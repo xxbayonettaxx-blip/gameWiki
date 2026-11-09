@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="ja" data-theme="light" data-font="16">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="コミュニティ掲示板 — スレッド選択・ツリー返信・日替わりID対応の交流広場">
+  <title>COMMUNITY BOARD — みんなの掲示板</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へ移動</a>
+
+  <!-- ==================== 1. 共通ヘッダー ==================== -->
+  <header class="masthead">
+    <div class="masthead-inner">
+      <a class="brand" href="/" aria-label="COMMUNITY BOARD ホーム">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 44 44">
+            <path d="M22 4 41 37H31L22 21 13 37H3Z" fill="currentColor"/>
+            <path d="m17 32 5-9 5 9Z" fill="#aba4ee"/>
+          </svg>
+        </span>
+        <span>
+          <strong>COMMUNITY BOARD</strong>
+          <small>DISCUSSION &amp; NOTES</small>
+        </span>
+      </a>
+
+      <nav class="header-nav" aria-label="メイン">
+        <span class="nav-current">掲示板<span>BOARD</span></span>
+        <button type="button" id="guide-open">
+          使い方<svg class="icon"><use href="#icon-arrow"/></svg>
+        </button>
+      </nav>
+
+      <button
+        class="settings-trigger"
+        id="settings-open"
+        type="button"
+        aria-label="表示設定を開く"
+        aria-expanded="false"
+        aria-controls="settings-sheet"
+      >
+        <svg class="icon"><use href="#icon-settings"/></svg>
+        <span>表示設定</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ==================== 2. 上からスライド展開する表示設定シート ==================== -->
+  <div id="settings-backdrop" class="sheet-backdrop" hidden></div>
+  <section
+    id="settings-sheet"
+    class="settings-sheet"
+    aria-labelledby="settings-title"
+    aria-hidden="true"
+    inert
+  >
+    <div class="settings-sheet-inner">
+      <div class="sheet-heading">
+        <div>
+          <span class="eyebrow">READING PREFERENCES</span>
+          <h2 id="settings-title">読みやすさを、自分らしく。</h2>
+        </div>
+        <button class="icon-button" type="button" id="settings-close" aria-label="表示設定を閉じる">×</button>
+      </div>
+
+      <div class="settings-columns">
+        <fieldset>
+          <legend>カラーテーマ（CUD色覚配慮対応）</legend>
+          <div class="theme-options">
+            <button type="button" data-set-theme="light" aria-pressed="true">
+              <span class="theme-preview theme-light"><i></i><i></i><i></i></span>
+              <span>ライト</span>
+            </button>
+            <button type="button" data-set-theme="dark" aria-pressed="false">
+              <span class="theme-preview theme-dark"><i></i><i></i><i></i></span>
+              <span>ダーク</span>
+            </button>
+            <button type="button" data-set-theme="paper" aria-pressed="false">
+              <span class="theme-preview theme-paper"><i></i><i></i><i></i></span>
+              <span>ペーパー</span>
+            </button>
+            <button type="button" data-set-theme="ud-light" aria-pressed="false">
+              <span class="theme-preview theme-ud-light"><i></i><i></i><i></i></span>
+              <span>UDライト</span>
+            </button>
+            <button type="button" data-set-theme="ud-dark" aria-pressed="false">
+              <span class="theme-preview theme-ud-dark"><i></i><i></i><i></i></span>
+              <span>UDダーク</span>
+            </button>
+          </div>
+        </fieldset>
+
+        <div class="settings-subcol">
+          <fieldset>
+            <legend>コメントの文字サイズ</legend>
+            <div class="font-options">
+              <button type="button" data-set-font="14" aria-pressed="false">小 <small>14px</small></button>
+              <button type="button" data-set-font="16" aria-pressed="true">中 <small>16px</small></button>
+              <button type="button" data-set-font="18" aria-pressed="false">大 <small>18px</small></button>
+            </div>
+          </fieldset>
+
+          <label class="background-setting">
+            <span>コメントに背景色をつける<small>本文と背景のコントラストを高めます。</small></span>
+            <input id="comment-background" type="checkbox" checked>
+          </label>
+        </div>
+      </div>
+
+      <p class="settings-note">設定欄の外側をクリックすると閉じます。表示設定のみブラウザに保存されます。</p>
+    </div>
+  </section>
+
+  <!-- ==================== 3. 本体シェル（読む体験優先・常設入力欄なし） ==================== -->
+  <div class="site-shell">
+    <aside class="sidebar" aria-label="掲示板のカテゴリ">
+      <div class="sidebar-label"><span>COMMUNITY</span><span class="tiny-line"></span></div>
+      <h2>みんなの掲示板</h2>
+      <p class="sidebar-intro">話す。聞く。見つける。<br>読む人にも優しい交流広場。</p>
+      <div class="sidebar-section-label">カテゴリ</div>
+      <nav id="categories" class="categories" aria-label="カテゴリ選択"></nav>
+
+      <section class="sidebar-note">
+        <span class="note-symbol" aria-hidden="true">i</span>
+        <h3>はじめての方へ</h3>
+        <p>普段は読みやすくスッキリ表示。<br>「新規投稿」や「返信」を押すと<br>入力欄がスライド表示されます。</p>
+        <button type="button" id="sidebar-guide">掲示板の使い方 <span aria-hidden="true">↗</span></button>
+      </section>
+
+      <div class="sidebar-bottom">
+        <span class="preview-dot" aria-hidden="true"></span>BOARD EDITION v0.5
+        <small>ツリー返信・日替わりID対応</small>
+      </div>
+    </aside>
+
+    <!-- メイン領域：スレッド選択 ＞ タイトル ＞ ピン留め投稿・返信 ＞ 通常投稿・返信 -->
+    <main id="main" class="main-content" tabindex="-1">
+      <div class="breadcrumb">
+        <span>COMMUNITY</span>
+        <span aria-hidden="true">/</span>
+        <span id="breadcrumb-category">読み込み中</span>
+      </div>
+
+      <div class="category-heading">
+        <div>
+          <div class="eyebrow">COMMUNITY BOARD</div>
+          <h1 id="category-title">掲示板を読み込み中...</h1>
+        </div>
+        <span class="category-caption">スレッドを選択して会話に参加できます。</span>
+      </div>
+
+      <!-- ① スレッド選択 -->
+      <div class="thread-select-header">
+        <h2>スレッドを選ぶ</h2>
+        <span id="thread-total">0 THREADS</span>
+      </div>
+      <div id="threads" class="thread-list" role="group" aria-label="スレッド選択"></div>
+
+      <!-- 選択中スレッドの内容カード -->
+      <section class="thread-content" aria-labelledby="thread-title">
+        <!-- ② スレッドタイトル -->
+        <div class="thread-heading">
+          <div class="thread-kicker">
+            <span id="thread-category-tag">-</span>
+            <span id="thread-label">THREAD 01</span>
+          </div>
+          <div class="thread-title-row">
+            <h2 id="thread-title">読み込み中...</h2>
+            <button type="button" class="refresh-button" id="reload-thread" title="最新の投稿を再取得">↻ 更新</button>
+          </div>
+        </div>
+
+        <div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+        <!-- ③ ピン留めされた通常投稿・返信ツリー（該当投稿がある時のみ表示） -->
+        <section id="pinned-section" class="pinned-section" aria-labelledby="pinned-heading" hidden>
+          <div class="pinned-section-header">
+            <svg class="icon"><use href="#icon-pin"/></svg>
+            <h3 id="pinned-heading">ピン留めされた投稿・返信</h3>
+            <span class="pin-label">PINNED POST</span>
+          </div>
+          <div id="pinned-comments" class="pinned-comments"></div>
+        </section>
+
+        <!-- ④ 通常投稿・返信ツリー -->
+        <div class="comments-toolbar">
+          <h3>通常投稿・返信 <span id="comment-count">0</span></h3>
+          <div class="toolbar-actions">
+            <label class="sort-label">
+              <span class="visually-hidden">親投稿の表示順</span>
+              <select id="sort">
+                <option value="old">古い順</option>
+                <option value="new">新しい順</option>
+              </select>
+            </label>
+            <button type="button" class="button-primary button-small" id="write-comment">
+              <svg class="icon"><use href="#icon-pen"/></svg>新規投稿
+            </button>
+          </div>
+        </div>
+
+        <div id="comments" class="comments"></div>
+      </section>
+
+      <footer class="page-footer">
+        <span>COMMUNITY <b>BOARD</b></span>
+        <p>誰もが読みやすく参加しやすい汎用掲示板（v0.5 MVP）</p>
+        <button type="button" class="footer-guide" id="footer-guide">使い方</button>
+        <span class="footer-version">EDITION v0.5</span>
+      </footer>
+    </main>
+  </div>
+
+  <!-- スクロール中でも片手で呼べるフローティング「新規投稿」ボタン -->
+  <button type="button" id="fab-write" class="fab-write" aria-label="新規投稿パネルを開く">
+    <svg class="icon"><use href="#icon-pen"/></svg>
+    <span>新規投稿</span>
+  </button>
+
+  <!-- ==================== 4. スライド式投稿ドロワー（スマホ:下から / PC:右から） ==================== -->
+  <div id="composer-backdrop" class="drawer-backdrop" hidden></div>
+  <aside
+    id="composer-drawer"
+    class="composer-drawer"
+    aria-labelledby="composer-mode-badge"
+    aria-hidden="true"
+    inert
+  >
+    <div class="drawer-header">
+      <div class="drawer-title-group">
+        <span id="composer-mode-badge" class="mode-badge is-new">✎ 新規投稿</span>
+        <p id="composer-thread-target" class="drawer-sub"></p>
+      </div>
+      <button type="button" class="icon-button" id="composer-close" aria-label="入力欄を閉じる">×</button>
+    </div>
+
+    <!-- 返信モード時のみ表示される「返信元プレビュー枠」 -->
+    <div id="reply-preview-box" class="reply-preview-box" hidden>
+      <div class="reply-preview-top">
+        <strong id="reply-label"></strong>
+        <button type="button" id="reply-switch-new" class="switch-new-btn">新規投稿へ切替</button>
+      </div>
+      <p id="reply-quote" class="reply-quote"></p>
+    </div>
+
+    <form id="comment-form" class="drawer-form">
+      <label class="field-label" for="author-name">名前 <span>任意・30文字以内</span></label>
+      <input id="author-name" type="text" maxlength="30" placeholder="名無しさん" autocomplete="off">
+
+      <label class="field-label" for="comment-body">本文 <span>必須・2,000文字以内</span></label>
+      <textarea id="comment-body" rows="6" maxlength="2000" placeholder="話したいことや、聞いてみたいことをどうぞ。" required></textarea>
+
+      <p id="form-error" class="form-error" role="alert"></p>
+
+      <div class="drawer-footer">
+        <span id="character-count">0 / 2,000</span>
+        <button class="button-primary" id="submit-button" type="submit">
+          書き込む <svg class="icon"><use href="#icon-arrow"/></svg>
+        </button>
+      </div>
+      <p class="form-note">日替わりIDが自動付与されます。個人情報や秘密情報は入力しないでください。</p>
+    </form>
+  </aside>
+
+  <!-- ==================== 5. 使い方ダイアログ ==================== -->
+  <dialog id="guide-dialog" class="guide-dialog" aria-labelledby="guide-title">
+    <div class="dialog-heading">
+      <div>
+        <span class="eyebrow">WELCOME TO THE BOARD</span>
+        <h2 id="guide-title">気持ちよく、話せる場所に。</h2>
+      </div>
+      <button class="icon-button" type="button" id="guide-close" aria-label="使い方を閉じる">×</button>
+    </div>
+    <ol class="guide-list">
+      <li>
+        <strong>普段は読むことに集中できる画面</strong>
+        <p>入力欄は普段隠れており、「新規投稿」や各コメントの「返信」を押したときだけスマホでは下から、PCでは右からスライドして現れます。</p>
+      </li>
+      <li>
+        <strong>返信先を見失わないハイライト表示</strong>
+        <p>返信中は対象の投稿が枠線でハイライトされ、入力パネル内にも返信元の文章がプレビュー表示されます。</p>
+      </li>
+      <li>
+        <strong>上からサッと引き出せる表示設定</strong>
+        <p>右上の「表示設定」を押すと上から設定シートが降りてきます。外側をクリックするだけで閉じられます。</p>
+      </li>
+    </ol>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <!-- SVGアイコン定義 -->
+  <svg class="svg-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16M8 3v6m8 0v6m-6 0v6"/></symbol>
+      <symbol id="icon-chat" viewBox="0 0 24 24"><path d="M20 14a3 3 0 0 1-3 3H9l-5 4V6a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3Z"/><path d="M8 8h8M8 12h5"/></symbol>
+      <symbol id="icon-question" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4 2c-1 .5-1.5 1-1.5 2m0 3h.01"/></symbol>
+      <symbol id="icon-book" viewBox="0 0 24 24"><path d="M12 5v15M3 4h5c2 0 4 1 4 3 0-2 2-3 4-3h5v14h-5c-2 0-4 1-4 2 0-1-2-2-4-2H3Z"/></symbol>
+      <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m9 3 9 9m-7-7-6 7 7 7 7-6M8 16l-5 5M5 12l-2 2 7 7 2-2"/></symbol>
+      <symbol id="icon-pen" viewBox="0 0 24 24"><path d="m4 16-1 5 5-1L20 8l-4-4Zm10-10 4 4M15 5l2-2 4 4-2 2"/></symbol>
+      <symbol id="icon-reply" viewBox="0 0 24 24"><path d="m9 5-6 6 6 6m-6-6h10c5 0 7 3 7 8"/></symbol>
+    </defs>
+  </svg>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# 依存パッケージ（将来追加した場合に備えて除外。package-lock.jsonは除外しない）
+node_modules/
+
+# 秘密情報を含む環境変数ファイル（.env.example はGit管理に含める）
+.env
+.env.*
+!.env.example
+
+# SQLite実データ・WAL一時ファイル・バックアップ一時ファイル（src/schema.sql は除外しない）
+/data/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+data/*.bak
+data/*.tmp-*
+*.db.tmp*
+*.sqlite
+*.sqlite3
+
+# ログ・OS一時ファイル
+logs/
+*.log
+.DS_Store
+Thumbs.db
+
+# ローカル専用のフロントエンドデザイン実験フォルダ（Git・VPS配備対象外）
+ui-sandbox/
