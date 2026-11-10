@@ -350,4 +350,36 @@ test('投稿ピン留めと旧DBからの非破壊自動マイグレーション
   assert.equal(posts[0].is_pinned, 0);
 
   assert.throws(() => db.setPostPinned(posts[0].id, true), /論理削除済み/);
+
+  // 5. カテゴリ追加・名前変更・スレッド追加・タイトル変更が既存データを壊さず動作すること
+  const addedCat = db.createCategory({ name: '攻略・編成' });
+  assert.equal(addedCat.name, '攻略・編成');
+  assert.equal(addedCat.display_order, 2);
+
+  assert.throws(() => db.createCategory({ name: '攻略・編成' }), /同名のカテゴリ/);
+
+  const renamedCat = db.updateCategory({
+    categoryId: addedCat.id,
+    name: '攻略・編成相談',
+    displayOrder: 5,
+  });
+  assert.equal(renamedCat.found, true);
+  assert.equal(renamedCat.category.name, '攻略・編成相談');
+  assert.equal(renamedCat.category.display_order, 5);
+
+  const addedThread = db.createThread({
+    categoryId: addedCat.id,
+    title: 'おすすめ編成スレッド',
+    pinnedText: '編成相談用の案内文です。',
+  });
+  assert.equal(addedThread.category_id, addedCat.id);
+  assert.equal(addedThread.title, 'おすすめ編成スレッド');
+  assert.equal(addedThread.is_pinned, 1);
+
+  const renamedThread = db.updateThread({
+    threadId: addedThread.id,
+    title: '総合編成相談スレッド',
+  });
+  assert.equal(renamedThread.found, true);
+  assert.equal(renamedThread.thread.title, '総合編成相談スレッド');
 });

@@ -206,6 +206,18 @@ test('静的配信と公開境界: 非公開ファイル・パストラバーサ
   const jsRes = await fetch(`${ctx.baseUrl}/app.js`);
   assert.equal(jsRes.status, 200);
 
+  // サブパス `/board/` 配備時のルーティング・リダイレクト検証
+  const boardNoSlash = await fetch(`${ctx.baseUrl}/board`, { redirect: 'manual' });
+  assert.equal(boardNoSlash.status, 301);
+  assert.equal(boardNoSlash.headers.get('location'), '/board/');
+
+  const boardIndexRes = await fetch(`${ctx.baseUrl}/board/`);
+  assert.equal(boardIndexRes.status, 200);
+  const boardCssRes = await fetch(`${ctx.baseUrl}/board/style.css`);
+  assert.equal(boardCssRes.status, 200);
+  const boardApiRes = await fetch(`${ctx.baseUrl}/board/api/categories`);
+  assert.equal(boardApiRes.status, 200);
+
   // フロントJS内に危険な innerHTML 代入および button/html 属性名衝突が存在しないことを静的検査
   const appJsPath = path.join(__dirname, '..', 'public', 'app.js');
   const appJsSource = fs.readFileSync(appJsPath, 'utf8');
@@ -429,4 +441,34 @@ test('F3・F5・F6回帰検証: ジャンクション脱出遮断・送信途中
     { encoding: 'utf8' }
   );
   assert.equal(sbProc.status, 1);
+
+  // 4. moderate.js CLI: カテゴリ追加・変更、スレッド追加・変更、一覧表示が正常動作すること
+  const cliDbPath = path.join(tmpRoot, 'cli-test.db');
+  const modScript = path.join(__dirname, '..', 'src', 'moderate.js');
+  const runMod = (cliArgs) =>
+    spawnSync(process.execPath, [modScript, ...cliArgs], {
+      encoding: 'utf8',
+      env: { ...process.env, DB_PATH: cliDbPath },
+    });
+
+  const addCatOut = runMod(['add-category', 'CLI追加カテゴリ']);
+  assert.equal(addCatOut.status, 0);
+  assert.ok(addCatOut.stdout.includes('CLI追加カテゴリ'));
+
+  const renCatOut = runMod(['rename-category', '1', 'CLI変更後カテゴリ', '3']);
+  assert.equal(renCatOut.status, 0);
+  assert.ok(renCatOut.stdout.includes('CLI変更後カテゴリ'));
+
+  const addThOut = runMod(['add-thread', '1', 'CLI追加スレッド', '案内テスト']);
+  assert.equal(addThOut.status, 0);
+  assert.ok(addThOut.stdout.includes('CLI追加スレッド'));
+
+  const renThOut = runMod(['rename-thread', '1', 'CLI変更後スレッド']);
+  assert.equal(renThOut.status, 0);
+  assert.ok(renThOut.stdout.includes('CLI変更後スレッド'));
+
+  const listOut = runMod(['list']);
+  assert.equal(listOut.status, 0);
+  assert.ok(listOut.stdout.includes('CLI変更後カテゴリ'));
+  assert.ok(listOut.stdout.includes('CLI変更後スレッド'));
 });

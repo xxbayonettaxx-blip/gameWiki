@@ -354,6 +354,19 @@ function createApp(options = {}) {
       const parsedUrl = new URL(req.url || '/', 'http://localhost');
       pathname = parsedUrl.pathname;
 
+      // サブパス `/board/` 配備時の互換処理（Nginxが /board をそのまま渡した場合でもルート / と同様に動作させる）
+      if (pathname === '/board') {
+        setSecurityHeaders(res);
+        res.writeHead(301, { Location: `/board/${parsedUrl.search || ''}` });
+        res.end();
+        return;
+      }
+      if (pathname === '/board/') {
+        pathname = '/';
+      } else if (pathname.startsWith('/board/')) {
+        pathname = pathname.slice('/board'.length);
+      }
+
       // [GET] ヘルスチェック
       if (pathname === '/api/health') {
         if (req.method !== 'GET') {

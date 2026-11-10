@@ -597,7 +597,7 @@
   async function loadInitialData() {
     showErrorBanner('');
     try {
-      const res = await fetch('/api/categories', { headers: { Accept: 'application/json' } });
+      const res = await fetch('api/categories', { headers: { Accept: 'application/json' } });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
@@ -669,7 +669,7 @@
     syncComposerHeader();
 
     try {
-      const res = await fetch(`/api/threads/${encodeURIComponent(String(threadId))}`, {
+      const res = await fetch(`api/threads/${encodeURIComponent(String(threadId))}`, {
         headers: { Accept: 'application/json' },
         signal: ctrl.signal,
       });
@@ -780,7 +780,7 @@
     $('#form-error').textContent = '';
 
     try {
-      const res = await fetch('/api/posts', {
+      const res = await fetch('api/posts', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

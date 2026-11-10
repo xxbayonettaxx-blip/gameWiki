@@ -199,12 +199,21 @@ function createBoardDb(options = {}) {
         WHERE id = ?
       `),
 
-      // 以下は seed.js（冪等な初期データ投入）専用の内部ステートメント
+      // 以下は seed.js（初期データ投入）および moderate.js（カテゴリ・スレッド管理CLI）用のステートメント
+      getCategoryById: sqlite.prepare(`
+        SELECT id, name, display_order, created_at FROM categories WHERE id = ?
+      `),
       findCategoryByName: sqlite.prepare(`
-        SELECT id, name FROM categories WHERE name = ?
+        SELECT id, name, display_order FROM categories WHERE name = ?
+      `),
+      getMaxCategoryOrder: sqlite.prepare(`
+        SELECT COALESCE(MAX(display_order), 0) AS max_order FROM categories
       `),
       insertCategory: sqlite.prepare(`
         INSERT INTO categories (name, display_order) VALUES (?, ?)
+      `),
+      updateCategoryById: sqlite.prepare(`
+        UPDATE categories SET name = ?, display_order = ? WHERE id = ?
       `),
       findThreadByCategoryAndTitle: sqlite.prepare(`
         SELECT id, title FROM threads WHERE category_id = ? AND title = ?
@@ -212,6 +221,9 @@ function createBoardDb(options = {}) {
       insertThread: sqlite.prepare(`
         INSERT INTO threads (category_id, title, pinned_text, is_pinned)
         VALUES (?, ?, ?, ?)
+      `),
+      updateThreadById: sqlite.prepare(`
+        UPDATE threads SET title = ?, pinned_text = ?, is_pinned = ? WHERE id = ?
       `),
     };
 
@@ -372,6 +384,130 @@ function createBoardDb(options = {}) {
           const nextVal = isPinned ? 1 : 0;
           stmts.updatePostPinned.run(nextVal, postId);
           return { found: true, isPinned: Boolean(nextVal) };
+        });
+      },
+
+      // 管理者による新規カテゴリ追加（同名重複・空欄・30文字超過を検査し、displayOrder未指定時は末尾順を自動採番）
+      createCategory({ name, displayOrder = null }) {
+        return runInTransaction(() => {
+          if (typeof name !== 'string' || /[\x00-\x1F\x7F]/.test(name)) {
+            throw new ValidationError('カテゴリ名に使用できない制御文字が含まれているか、形式が不正です。', 400);
+          }
+          const trimmed = name.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
+          if (trimmed.length < 1 || trimmed.length > 30) {
+            throw new ValidationError('カテゴリ名は1〜30文字で指定してください。', 400);
+          }
+          const duplicate = stmts.findCategoryByName.get(trimmed);
+          if (duplicate) {
+            throw new ValidationError(`同名のカテゴリ「${trimmed}」が既に存在します（ID: ${duplicate.id}）。`, 400);
+          }
+
+          let orderVal;
+          if (displayOrder === null || displayOrder === undefined) {
+            const maxRow = stmts.getMaxCategoryOrder.get();
+            orderVal = Number(maxRow?.max_order ?? 0) + 1;
+          } else {
+            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
+              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
+            }
+            orderVal = displayOrder;
+          }
+
+          const info = stmts.insertCategory.run(trimmed, orderVal);
+          return toPlain(stmts.getCategoryById.get(Number(info.lastInsertRowid)));
+        });
+      },
+
+      // 管理者による既存カテゴリの名前・表示順変更（配下のスレッドや投稿は一切失われずそのまま維持される）
+      updateCategory({ categoryId, name = undefined, displayOrder = undefined }) {
+        return runInTransaction(() => {
+          const existing = stmts.getCategoryById.get(categoryId);
+          if (!existing) {
+            return { found: false, category: null };
+          }
+
+          let nextName = existing.name;
+          if (name !== undefined && name !== null) {
+            if (typeof name !== 'string' || /[\x00-\x1F\x7F]/.test(name)) {
+              throw new ValidationError('カテゴリ名に使用できない制御文字が含まれているか、形式が不正です。', 400);
+            }
+            const trimmed = name.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
+            if (trimmed.length < 1 || trimmed.length > 30) {
+              throw new ValidationError('カテゴリ名は1〜30文字で指定してください。', 400);
+            }
+            const dup = stmts.findCategoryByName.get(trimmed);
+            if (dup && Number(dup.id) !== Number(categoryId)) {
+              throw new ValidationError(`同名のカテゴリ「${trimmed}」が既に存在します（ID: ${dup.id}）。`, 400);
+            }
+            nextName = trimmed;
+          }
+
+          let nextOrder = existing.display_order;
+          if (displayOrder !== undefined && displayOrder !== null) {
+            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
+              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
+            }
+            nextOrder = displayOrder;
+          }
+
+          stmts.updateCategoryById.run(nextName, nextOrder, categoryId);
+          return {
+            found: true,
+            category: toPlain(stmts.getCategoryById.get(categoryId)),
+          };
+        });
+      },
+
+      // 管理者による新規スレッド追加（所属カテゴリの実在確認＋タイトル1〜100文字＋案内文500文字以内検査）
+      createThread({ categoryId, title, pinnedText = null, isPinned = false }) {
+        return runInTransaction(() => {
+          const category = stmts.getCategoryById.get(categoryId);
+          if (!category) {
+            throw new ValidationError(`カテゴリ #${categoryId} は存在しません。`, 404);
+          }
+
+          if (typeof title !== 'string' || /[\x00-\x1F\x7F]/.test(title)) {
+            throw new ValidationError('スレッドタイトルに使用できない制御文字が含まれているか、形式が不正です。', 400);
+          }
+          const trimmedTitle = title.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
+          if (trimmedTitle.length < 1 || trimmedTitle.length > 100) {
+            throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
+          }
+
+          let normalizedPinText = null;
+          if (pinnedText !== null && pinnedText !== undefined && String(pinnedText).trim() !== '') {
+            const textStr = String(pinnedText).replace(/\r\n?/g, '\n').trim();
+            if (textStr.length > 500) {
+              throw new ValidationError('スレッド案内文（pinned_text）は500文字以内で指定してください。', 400);
+            }
+            normalizedPinText = textStr;
+          }
+
+          const pinFlag = isPinned || normalizedPinText !== null ? 1 : 0;
+          const info = stmts.insertThread.run(categoryId, trimmedTitle, normalizedPinText, pinFlag);
+          return toPlain(stmts.getThreadById.get(Number(info.lastInsertRowid)));
+        });
+      },
+
+      // 管理者による既存スレッドのタイトル変更（配下の投稿ツリーは一切失われずそのまま維持される）
+      updateThread({ threadId, title }) {
+        return runInTransaction(() => {
+          const existing = stmts.getThreadById.get(threadId);
+          if (!existing) {
+            return { found: false, thread: null };
+          }
+          if (typeof title !== 'string' || /[\x00-\x1F\x7F]/.test(title)) {
+            throw new ValidationError('スレッドタイトルに使用できない制御文字が含まれているか、形式が不正です。', 400);
+          }
+          const trimmedTitle = title.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
+          if (trimmedTitle.length < 1 || trimmedTitle.length > 100) {
+            throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
+          }
+          stmts.updateThreadById.run(trimmedTitle, existing.pinned_text, existing.is_pinned, threadId);
+          return {
+            found: true,
+            thread: toPlain(stmts.getThreadById.get(threadId)),
+          };
         });
       },
 

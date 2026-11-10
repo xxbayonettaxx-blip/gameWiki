@@ -39,6 +39,9 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 | **初期データ投入** | `npm run seed` | 固定カテゴリ（2件）と初期スレッド（4件）を投入します。**再実行しても重複せず、既存の利用者投稿も消えません。** |
 | **サーバー起動** | `npm start` | 既定で `http://127.0.0.1:3001` で待ち受けます。起動ログに公開フォルダ・DBパス・`foreign_keys=1`・`journal_mode=wal` が出力されます。 |
 | **デザイン実験起動** | `npm run sandbox -- <案名> [ポート]` | `public/` を変更せず、`ui-sandbox/<案名>/`（例: `sample-base`, `slide-drawer`）を別ポート（既定 `3002`）で実DB接続起動します。 |
+| **カテゴリ・スレッド一覧確認** | `npm run moderate -- list` | 現在登録されているカテゴリ・スレッドのID・表示順・投稿数を一覧表示します。 |
+| **カテゴリの追加 / 名前変更** | `npm run moderate -- add-category "<名前>" [表示順]`<br>`npm run moderate -- rename-category <ID> "<新名>" [表示順]` | 既存データを消さずに新しいカテゴリを追加、または既存カテゴリの名前・表示順を変更します。 |
+| **スレッドの追加 / 名前変更** | `npm run moderate -- add-thread <カテゴリID> "<題名>" ["案内文"]`<br>`npm run moderate -- rename-thread <ID> "<新題名>"` | 指定カテゴリ内に新しいスレッドを追加、または既存スレッドのタイトルを変更します。 |
 | **投稿のピン留め / 解除** | `npm run moderate -- pin <投稿ID>` / `unpin <投稿ID>` | 指定した投稿（＋返信ツリー）を上部のピン留め枠へ固定表示、または解除します。 |
 | **投稿の論理削除** | `npm run moderate -- delete <投稿ID>` | 指定した投稿を `is_deleted = 1` に更新（ピン留めも自動解除）します。API/画面からは本文と名前がマスクされ、子返信はそのまま読めます。 |
 
