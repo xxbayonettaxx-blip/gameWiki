@@ -242,6 +242,20 @@ test('一時ファイルDB: WAL有効化・seed再実行の非破壊性・再起
   assert.equal(secondSeed.createdThreads, 0);
   assert.equal(secondSeed.createdPosts, 0);
 
+  // 3b. 初期シード由来のカテゴリ(#1)・スレッド(#1)を改名した後に seed を再実行しても旧名が復活しないこと
+  db1.updateCategory({ categoryId: 1, name: '総合交流広場' });
+  db1.updateThread({ threadId: 1, title: 'メイン雑談スレッド' });
+  const thirdSeed = runSeed(db1);
+  assert.equal(thirdSeed.createdCategories, 0);
+  assert.equal(thirdSeed.createdThreads, 0);
+  assert.equal(thirdSeed.createdPosts, 0);
+  const catsAfterRenameSeed = db1.listCategoriesWithThreads();
+  assert.equal(catsAfterRenameSeed.some((c) => c.name === '雑談・交流'), false);
+  assert.equal(
+    catsAfterRenameSeed.flatMap((c) => c.threads).some((th) => th.title === '総合雑談スレッド'),
+    false
+  );
+
   // 4. バックアップを取得してから db1 を閉じる（停止シミュレーション）
   db1.backupTo(backupDbPath);
   db1.close();
