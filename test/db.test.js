@@ -382,4 +382,16 @@ test('投稿ピン留めと旧DBからの非破壊自動マイグレーション
   });
   assert.equal(renamedThread.found, true);
   assert.equal(renamedThread.thread.title, '総合編成相談スレッド');
+
+  // 案内文付きで追加したスレッドには初期ピン留め投稿（is_pinned = 1）が自動作成されUIに表示されること
+  const addedThreadDetail = db.getThreadDetail(addedThread.id);
+  assert.equal(addedThreadDetail.posts.length, 1);
+  assert.equal(addedThreadDetail.posts[0].is_pinned, 1);
+  assert.equal(addedThreadDetail.posts[0].content, '編成相談用の案内文です。');
+
+  // スレッド・カテゴリ改名後に seed を再実行しても、旧名スレッドや重複データが一切作られないこと
+  const reSeedAfterRename = runSeed(db);
+  assert.equal(reSeedAfterRename.createdCategories, 0);
+  assert.equal(reSeedAfterRename.createdThreads, 0);
+  assert.equal(reSeedAfterRename.createdPosts, 0);
 });

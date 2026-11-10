@@ -485,7 +485,21 @@ function createBoardDb(options = {}) {
 
           const pinFlag = isPinned || normalizedPinText !== null ? 1 : 0;
           const info = stmts.insertThread.run(categoryId, trimmedTitle, normalizedPinText, pinFlag);
-          return toPlain(stmts.getThreadById.get(Number(info.lastInsertRowid)));
+          const newThreadId = Number(info.lastInsertRowid);
+
+          // 案内文が指定された場合は、現行UIの「ピン留めされた投稿・返信」枠にも表示されるよう初期ピン留め投稿を作成する
+          if (normalizedPinText !== null) {
+            stmts.insertPostWithPin.run(
+              newThreadId,
+              null,
+              '管理案内',
+              'admin-init',
+              normalizedPinText,
+              1
+            );
+          }
+
+          return toPlain(stmts.getThreadById.get(newThreadId));
         });
       },
 
@@ -511,9 +525,13 @@ function createBoardDb(options = {}) {
         });
       },
 
-      // 冪等な初期データ投入（src/seed.js から呼び出される専用処理）
+      // 冪等な初期データ投入（空DBへの初回投入専用。スレッド改名後に再実行しても旧名スレッドが復活しないよう保護）
       seedInitialData(seedCategories) {
         return runInTransaction(() => {
+          if (stmts.listCategories.all().length > 0) {
+            return { createdCategories: 0, createdThreads: 0, createdPosts: 0 };
+          }
+
           let createdCategories = 0;
           let createdThreads = 0;
           let createdPosts = 0;
