@@ -225,8 +225,8 @@ test('一時ファイルDB: WAL有効化・seed再実行の非破壊性・再起
 
   // 2. 初回 seed 実行と利用者投稿の追加
   const firstSeed = runSeed(db1);
-  assert.equal(firstSeed.createdCategories, 2);
-  assert.equal(firstSeed.createdThreads, 4);
+  assert.equal(firstSeed.createdCategories, 3);
+  assert.equal(firstSeed.createdThreads, 10);
 
   const userPost = db1.createPost({
     threadId: 1,
@@ -250,9 +250,9 @@ test('一時ファイルDB: WAL有効化・seed再実行の非破壊性・再起
   assert.equal(thirdSeed.createdThreads, 0);
   assert.equal(thirdSeed.createdPosts, 0);
   const catsAfterRenameSeed = db1.listCategoriesWithThreads();
-  assert.equal(catsAfterRenameSeed.some((c) => c.name === '雑談・交流'), false);
+  assert.equal(catsAfterRenameSeed.some((c) => c.name === '雑談'), false);
   assert.equal(
-    catsAfterRenameSeed.flatMap((c) => c.threads).some((th) => th.title === '総合雑談スレッド'),
+    catsAfterRenameSeed.flatMap((c) => c.threads).some((th) => th.title === '雑談'),
     false
   );
 

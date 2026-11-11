@@ -54,20 +54,20 @@ test('HTTP統合: スレッド一覧・切替・投稿・返信・XSS文字列�
   const catRes = await fetch(`${ctx.baseUrl}/api/categories`);
   assert.equal(catRes.status, 200);
   const { categories } = await catRes.json();
-  assert.equal(categories.length, 2);
+  assert.equal(categories.length, 3);
 
   const threadWithPin = categories[0].threads[0];
-  const threadWithoutPin = categories[0].threads[1];
+  const threadWithoutPin = categories[0].threads[2];
 
   // 2. スレッド切替時のタイトル・ピン留め文同期確認
   const t1Res = await fetch(`${ctx.baseUrl}/api/threads/${threadWithPin.id}`);
   const t1Data = await t1Res.json();
-  assert.equal(t1Data.thread.title, '総合雑談スレッド');
-  assert.ok(t1Data.thread.pinned_text.includes('総合雑談スレッド'));
+  assert.equal(t1Data.thread.title, '雑談');
+  assert.ok(t1Data.thread.pinned_text.includes('雑談スレッド'));
 
   const t2Res = await fetch(`${ctx.baseUrl}/api/threads/${threadWithoutPin.id}`);
   const t2Data = await t2Res.json();
-  assert.equal(t2Data.thread.title, '動作確認・フリートーク');
+  assert.equal(t2Data.thread.title, 'あいさつ・自己紹介');
   assert.equal(t2Data.thread.pinned_text, null);
 
   // 3. XSS攻撃文字列を含む親投稿と、それに対する子返信の登録
@@ -285,7 +285,7 @@ test('デザイン実験モード (publicDir 切替): 別フォルダのフロ�
 
 test('管理ピン留めAPIとデザイン実験2案（sample-base / slide-drawer）の静的・HTTP検証', async (t) => {
   // 1. 実験用案すべての app.js にも危険な innerHTML 代入が一切存在しないことを検査
-  const variantNames = ['initial-v0.5', 'sample-base', 'slide-drawer'];
+  const variantNames = ['initial-v0.5', 'sample-base', 'slide-drawer', 'compact-top-sheet'];
   for (const name of variantNames) {
     const variantJsPath = path.join(__dirname, '..', 'ui-sandbox', name, 'app.js');
     if (fs.existsSync(variantJsPath)) {

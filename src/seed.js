@@ -14,20 +14,21 @@
 const { createBoardDb, resolveProjectDbPath } = require('./db');
 
 // ---------------------------------------------------------------------
-// 1. v0.5 固定シードデータ定義（カテゴリ2つ × 各スレッド2つ）
-// - ピン留め案内文（pinnedText）があるスレッドと null のスレッドの両方を用意し、
-//   画面切替時に「案内枠の表示／非表示」が正しく切り替わることを確認できるようにする。
+// 1. v0.5 固定シードデータ定義（カテゴリ3つ × 各スレッド指定）
+//   - 雑談: 雑談 / 質問、初心者質問 / あいさつ・自己紹介
+//   - 攻略: 育成 / 塵煙前線 / 開拓征途 / 他
+//   - イベント: 今期のイベント / 時期イベント / 先行サーバー情報
 // ---------------------------------------------------------------------
 const SEED_CATEGORIES = [
   {
-    name: '雑談・交流',
+    name: '雑談',
     displayOrder: 1,
     threads: [
       {
-        title: '総合雑談スレッド',
+        title: '雑談',
         isPinned: true,
         pinnedText:
-          'ここは誰でも気軽に書き込める総合雑談スレッドです。\n誹謗中傷や個人情報の書き込みは控え、互いに配慮した交流をお願いします。',
+          'ここは誰でも気軽に書き込める雑談スレッドです。\n誹謗中傷や個人情報の書き込みは控え、互いに配慮した交流をお願いします。',
         samplePosts: [
           {
             ref: 'p1',
@@ -35,7 +36,7 @@ const SEED_CATEGORIES = [
             visitorId: 'admin-init',
             isPinned: true,
             content:
-              'スレッドを開設しました！\nネタバレを含む話題は最初にひと言添えて、お互いを尊重しながら気軽にお話しください。',
+              '雑談スレッドを開設しました！\nネタバレを含む話題は最初にひと言添えて、お互いを尊重しながら気軽にお話しください。',
           },
           {
             ref: 'p2',
@@ -54,26 +55,7 @@ const SEED_CATEGORIES = [
         ],
       },
       {
-        title: '動作確認・フリートーク',
-        isPinned: false,
-        pinnedText: null, // ピン留め文なし（画面上で案内枠自体が非表示になることを確認する用）
-        samplePosts: [
-          {
-            ref: 't2p1',
-            authorName: '名無しさん',
-            visitorId: 'sample0003',
-            content: 'このスレッドにはピン留め案内文が設定されていません（案内枠が表示されないことを確認できます）。',
-          },
-        ],
-      },
-    ],
-  },
-  {
-    name: '質問・検証',
-    displayOrder: 2,
-    threads: [
-      {
-        title: '初心者質問スレッド',
+        title: '質問、初心者質問',
         isPinned: true,
         pinnedText:
           '質問する際は「どの場面で困っているか」「試したこと」を添えると回答がつきやすくなります。\n回答は該当の質問投稿の「返信」ボタンから繋げてください。',
@@ -95,17 +77,71 @@ const SEED_CATEGORIES = [
         ],
       },
       {
-        title: 'データ・仕様検証スレッド',
+        title: 'あいさつ・自己紹介',
         isPinned: false,
-        pinnedText: '検証結果や気づいた挙動を共有するスレッドです。',
+        pinnedText: null,
         samplePosts: [
           {
-            ref: 'v1',
-            authorName: '検証班',
-            visitorId: 'sample0020',
-            content: 'スレッドを切り替えた際に、タイトル・ピン留め文・投稿ツリーが同時に切り替わるか確認してください。',
+            ref: 'g1',
+            authorName: '名無しさん',
+            visitorId: 'sample0003',
+            content: '新しく参加された方はこちらで一言どうぞ！',
           },
         ],
+      },
+    ],
+  },
+  {
+    name: '攻略',
+    displayOrder: 2,
+    threads: [
+      {
+        title: '育成',
+        isPinned: true,
+        pinnedText: 'キャラクターや装備の育成・強化に関する情報共有スレッドです。',
+        samplePosts: [],
+      },
+      {
+        title: '塵煙前線',
+        isPinned: true,
+        pinnedText: '塵煙前線の攻略・編成相談スレッドです。',
+        samplePosts: [],
+      },
+      {
+        title: '開拓征途',
+        isPinned: true,
+        pinnedText: '開拓征途の攻略・マップ情報共有スレッドです。',
+        samplePosts: [],
+      },
+      {
+        title: '他',
+        isPinned: false,
+        pinnedText: null,
+        samplePosts: [],
+      },
+    ],
+  },
+  {
+    name: 'イベント',
+    displayOrder: 3,
+    threads: [
+      {
+        title: '今期のイベント',
+        isPinned: true,
+        pinnedText: '現在開催中の最新イベントに関する攻略・情報交換スレッドです。',
+        samplePosts: [],
+      },
+      {
+        title: '時期イベント',
+        isPinned: false,
+        pinnedText: null,
+        samplePosts: [],
+      },
+      {
+        title: '先行サーバー情報',
+        isPinned: false,
+        pinnedText: '先行サーバー（CN/海外版等）の情報や先行実装要素に関するスレッドです。ネタバレに配慮してご活用ください。',
+        samplePosts: [],
       },
     ],
   },

@@ -114,7 +114,7 @@
     </div>
   </section>
 
-  <!-- ==================== 3. 本体シェル（読む体験優先・常設入力欄なし） ==================== -->
+  <!-- ==================== 3. 本体シェル（コンパクト・一軍まとめ表示） ==================== -->
   <div class="site-shell">
     <aside class="sidebar" aria-label="掲示板のカテゴリ">
       <div class="sidebar-label"><span>COMMUNITY</span><span class="tiny-line"></span></div>
@@ -126,7 +126,7 @@
       <section class="sidebar-note">
         <span class="note-symbol" aria-hidden="true">i</span>
         <h3>はじめての方へ</h3>
-        <p>普段は読みやすくスッキリ表示。<br>「新規投稿」や「返信」を押すと<br>入力欄がスライド表示されます。</p>
+        <p>親・子・孫の3層ツリーでスッキリ表示。<br>「新規投稿」や「返信」を押すと<br>上部から入力シートが降りてきます。</p>
         <button type="button" id="sidebar-guide">掲示板の使い方 <span aria-hidden="true">↗</span></button>
       </section>
 
@@ -180,14 +180,14 @@
           <div class="pinned-section-header">
             <svg class="icon"><use href="#icon-pin"/></svg>
             <h3 id="pinned-heading">ピン留めされた投稿・返信</h3>
-            <span class="pin-label">PINNED POST</span>
+            <span class="pin-label">PINNED</span>
           </div>
           <div id="pinned-comments" class="pinned-comments"></div>
         </section>
 
         <!-- ④ 通常投稿・返信ツリー -->
         <div class="comments-toolbar">
-          <h3>通常投稿・返信 <span id="comment-count">0</span></h3>
+          <h3>投稿・返信一覧 <span id="comment-count">0</span></h3>
           <div class="toolbar-actions">
             <label class="sort-label">
               <span class="visually-hidden">親投稿の表示順</span>
@@ -220,7 +220,7 @@
     <span>新規投稿</span>
   </button>
 
-  <!-- ==================== 4. スライド式投稿ドロワー（スマホ:下から / PC:右から） ==================== -->
+  <!-- ==================== 4. 上からスライド展開する投稿シート（ソフトキーボード対策：上部に目立つ送信ボタン） ==================== -->
   <div id="composer-backdrop" class="drawer-backdrop" hidden></div>
   <aside
     id="composer-drawer"
@@ -229,38 +229,42 @@
     aria-hidden="true"
     inert
   >
-    <div class="drawer-header">
-      <div class="drawer-title-group">
-        <span id="composer-mode-badge" class="mode-badge is-new">✎ 新規投稿</span>
-        <p id="composer-thread-target" class="drawer-sub"></p>
-      </div>
-      <button type="button" class="icon-button" id="composer-close" aria-label="入力欄を閉じる">×</button>
-    </div>
-
-    <!-- 返信モード時のみ表示される「返信元プレビュー枠」 -->
-    <div id="reply-preview-box" class="reply-preview-box" hidden>
-      <div class="reply-preview-top">
-        <strong id="reply-label"></strong>
-        <button type="button" id="reply-switch-new" class="switch-new-btn">新規投稿へ切替</button>
-      </div>
-      <p id="reply-quote" class="reply-quote"></p>
-    </div>
-
     <form id="comment-form" class="drawer-form">
-      <label class="field-label" for="author-name">名前 <span>任意・30文字以内</span></label>
-      <input id="author-name" type="text" maxlength="30" placeholder="名無しさん" autocomplete="off">
-
-      <label class="field-label" for="comment-body">本文 <span>必須・2,000文字以内</span></label>
-      <textarea id="comment-body" rows="6" maxlength="2000" placeholder="話したいことや、聞いてみたいことをどうぞ。" required></textarea>
-
-      <p id="form-error" class="form-error" role="alert"></p>
-
-      <div class="drawer-footer">
-        <span id="character-count">0 / 2,000</span>
-        <button class="button-primary" id="submit-button" type="submit">
-          書き込む <svg class="icon"><use href="#icon-arrow"/></svg>
+      <!-- ★ ソフトキーボードで隠れないよう、シート最上部に「閉じる」「モード表示」「大きく目立つ書き込むボタン」を集約 -->
+      <div class="drawer-header">
+        <button type="button" class="icon-button" id="composer-close" aria-label="入力欄を閉じる">×</button>
+        <div class="drawer-title-group">
+          <span id="composer-mode-badge" class="mode-badge is-new">✎ 新規投稿</span>
+          <p id="composer-thread-target" class="drawer-sub"></p>
+        </div>
+        <button class="button-primary submit-top-btn" id="submit-button" type="submit">
+          <svg class="icon"><use href="#icon-pen"/></svg>
+          <span>書き込む</span>
         </button>
       </div>
+
+      <!-- 返信モード時のみ表示されるコンパクトな「返信元プレビュー枠」 -->
+      <div id="reply-preview-box" class="reply-preview-box" hidden>
+        <div class="reply-preview-top">
+          <strong id="reply-label"></strong>
+          <button type="button" id="reply-switch-new" class="switch-new-btn">新規投稿へ切替</button>
+        </div>
+        <p id="reply-quote" class="reply-quote"></p>
+      </div>
+
+      <!-- 名前欄と文字数カウンタを1行にまとめて省スペース化 -->
+      <div class="drawer-meta-row">
+        <label class="field-inline" for="author-name">
+          <span>名前</span>
+          <input id="author-name" type="text" maxlength="30" placeholder="名無しさん（任意）" autocomplete="off">
+        </label>
+        <span id="character-count" class="char-counter">0 / 2,000</span>
+      </div>
+
+      <label class="visually-hidden" for="comment-body">本文（必須・2,000文字以内）</label>
+      <textarea id="comment-body" rows="4" maxlength="2000" placeholder="本文を入力してください（必須・2,000文字以内）" required></textarea>
+
+      <p id="form-error" class="form-error" role="alert"></p>
       <p class="form-note">日替わりIDが自動付与されます。個人情報や秘密情報は入力しないでください。</p>
     </form>
   </aside>
@@ -276,16 +280,16 @@
     </div>
     <ol class="guide-list">
       <li>
-        <strong>普段は読むことに集中できる画面</strong>
-        <p>入力欄は普段隠れており、「新規投稿」や各コメントの「返信」を押したときだけスマホでは下から、PCでは右からスライドして現れます。</p>
+        <strong>ソフトキーボードでも隠れない上スライド入力欄</strong>
+        <p>「新規投稿」や「返信」を押すと画面上部から入力シートが降りてきます。右上に大きく配置された「書き込む」ボタンはスマホのキーボード表示中も常に隠れず押せます。</p>
       </li>
       <li>
-        <strong>返信先を見失わないハイライト表示</strong>
-        <p>返信中は対象の投稿が枠線でハイライトされ、入力パネル内にも返信元の文章がプレビュー表示されます。</p>
+        <strong>親・子・孫（3層）のコンパクトな一軍表示</strong>
+        <p>親投稿とその返信ツリーをひとまとまりのグループとしてコンパクトに表示します。コメント番号は名前の左隣に、返信先（>>番号）は本文先頭に表示されます。</p>
       </li>
       <li>
         <strong>上からサッと引き出せる表示設定</strong>
-        <p>右上の「表示設定」を押すと上から設定シートが降りてきます。外側をクリックするだけで閉じられます。</p>
+        <p>右上の「表示設定」からカラーテーマ（CUD対応）・文字サイズ・コメント背景色有無をいつでも切り替えられます。</p>
       </li>
     </ol>
   </dialog>

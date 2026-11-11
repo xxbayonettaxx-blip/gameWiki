@@ -11,6 +11,7 @@
     "start": "node --env-file-if-exists=.env server.js",
     "sandbox": "node --env-file-if-exists=.env src/sandbox.js",
     "seed": "node --env-file-if-exists=.env src/seed.js",
+    "sync-structure": "node --env-file-if-exists=.env src/sync_structure.js",
     "moderate": "node --env-file-if-exists=.env src/moderate.js",
     "test": "node --test test/*.test.js"
   },

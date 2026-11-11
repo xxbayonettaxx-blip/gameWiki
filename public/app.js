@@ -19,7 +19,7 @@
   const ALLOWED_THEMES = ['light', 'dark', 'paper', 'ud-light', 'ud-dark'];
   const ALLOWED_FONTS = [14, 16, 18];
   const AVATAR_COLORS = ['', 'sage', 'sand', 'blue'];
-  const MAX_VISUAL_DEPTH = 6;
+  const MAX_VISUAL_DEPTH = 2; // 親(0)・子(1)・孫(2)の3層までインデント、4層目以降はフラット
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -320,7 +320,7 @@
       if (postEl) {
         postEl.scrollIntoView({
           behavior: scrollBehavior(),
-          block: window.innerWidth < 760 ? 'start' : 'center',
+          block: window.innerWidth < 760 ? 'end' : 'center',
         });
       }
     }
@@ -466,13 +466,17 @@
     const main = el('div', 'comment-main');
     const meta = el('div', 'comment-meta');
 
+    // コメント番号は名前のすぐ左隣に配置
+    const postNumEl = el('span', 'post-number', `#${node.id}`);
+
     if (isDeleted) {
-      meta.append(el('span', 'deleted-label', '削除された投稿'));
+      meta.append(postNumEl, el('span', 'deleted-label', '削除された投稿'));
     } else {
       if (node.is_pinned === 1) {
         meta.append(el('span', 'pinned-badge', '📌 ピン留め'));
       }
       meta.append(
+        postNumEl,
         el('span', 'comment-author', node.author_name),
         el('span', 'comment-id', `ID: ${node.visitor_id}`)
       );
@@ -480,25 +484,28 @@
 
     const timeEl = el('time', 'comment-time', formatTime(node.created_at));
     if (node.created_at) timeEl.dateTime = node.created_at;
-    meta.append(timeEl, el('span', 'post-number', `#${node.id}`));
+    meta.append(timeEl);
     main.append(meta);
 
+    // >> はコメント欄（本文）先頭にインライン配置
+    const textEl = el(
+      'p',
+      isDeleted ? 'deleted-text' : 'comment-text'
+    );
     if (parentId) {
-      const jumpBtn = el('button', 'reply-target', `>> ${parentId}`);
+      const jumpBtn = el('button', 'reply-target', `>>${parentId}`);
       jumpBtn.type = 'button';
       jumpBtn.dataset.jumpId = String(parentId);
-      jumpBtn.setAttribute('aria-label', `親投稿 ${parentId} へ移動`);
-      main.append(jumpBtn);
+      jumpBtn.setAttribute('aria-label', `返信先 投稿 #${parentId} へ移動`);
+      textEl.append(jumpBtn);
+      textEl.append(document.createTextNode(' '));
     }
-
-    main.append(
-      el(
-        'p',
-        isDeleted ? 'deleted-text' : 'comment-text',
+    textEl.append(
+      document.createTextNode(
         isDeleted ? 'この投稿は削除されました。返信は引き続き表示されます。' : node.content
       )
     );
-
+    main.append(textEl);
     if (!isDeleted) {
       const actions = el('div', 'comment-actions');
       const replyBtn = el('button', 'reply-button');
