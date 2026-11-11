@@ -225,6 +225,62 @@ function createBoardDb(options = {}) {
       updateThreadById: sqlite.prepare(`
         UPDATE threads SET title = ?, pinned_text = ?, is_pinned = ? WHERE id = ?
       `),
+
+      // 物理削除（purge-tree / purge-thread）用のステートメント
+      getPostWithThreadAndCategory: sqlite.prepare(`
+        SELECT
+          p.id, p.thread_id, p.parent_id, p.author_name, p.visitor_id, p.content, p.is_pinned, p.is_deleted, p.created_at,
+          t.title AS thread_title, t.category_id,
+          c.name AS category_name
+        FROM posts p
+        JOIN threads t ON t.id = p.thread_id
+        JOIN categories c ON c.id = t.category_id
+        WHERE p.id = ?
+      `),
+
+      getPostDescendantsInLeafOrder: sqlite.prepare(`
+        WITH RECURSIVE tree AS (
+          SELECT id, parent_id, thread_id, author_name, visitor_id, content, is_pinned, is_deleted, created_at, 1 AS depth
+          FROM posts WHERE id = ?
+          UNION ALL
+          SELECT p.id, p.parent_id, p.thread_id, p.author_name, p.visitor_id, p.content, p.is_pinned, p.is_deleted, p.created_at, t.depth + 1
+          FROM posts p JOIN tree t ON p.parent_id = t.id
+        )
+        SELECT id, parent_id, thread_id, author_name, visitor_id, content, is_pinned, is_deleted, created_at, depth
+        FROM tree
+        ORDER BY depth DESC, id DESC
+      `),
+
+      deletePostById: sqlite.prepare(`
+        DELETE FROM posts WHERE id = ?
+      `),
+
+      getThreadWithCategory: sqlite.prepare(`
+        SELECT
+          t.id, t.category_id, t.title, t.pinned_text, t.is_pinned, t.created_at,
+          c.name AS category_name
+        FROM threads t
+        JOIN categories c ON c.id = t.category_id
+        WHERE t.id = ?
+      `),
+
+      getThreadPostsInLeafOrder: sqlite.prepare(`
+        WITH RECURSIVE tree AS (
+          SELECT id, parent_id, thread_id, author_name, visitor_id, content, is_pinned, is_deleted, created_at, 1 AS depth
+          FROM posts
+          WHERE thread_id = ? AND (parent_id IS NULL OR parent_id NOT IN (SELECT id FROM posts WHERE thread_id = ?))
+          UNION ALL
+          SELECT p.id, p.parent_id, p.thread_id, p.author_name, p.visitor_id, p.content, p.is_pinned, p.is_deleted, p.created_at, t.depth + 1
+          FROM posts p JOIN tree t ON p.parent_id = t.id
+        )
+        SELECT id, parent_id, thread_id, author_name, visitor_id, content, is_pinned, is_deleted, created_at, depth
+        FROM tree
+        ORDER BY depth DESC, id DESC
+      `),
+
+      deleteThreadById: sqlite.prepare(`
+        DELETE FROM threads WHERE id = ?
+      `),
     };
 
     // node:sqlite が返す null prototype オブジェクトを通常のプレーンオブジェクトへ変換する補助関数
@@ -589,8 +645,92 @@ function createBoardDb(options = {}) {
         });
       },
 
+      // ---------------------------------------------------------------
+      // 物理削除プレビュー・実行（管理CLI: purge-tree / purge-thread）
+      // 外部キー制約（ON DELETE RESTRICT）を維持したまま、
+      // 再帰CTE（WITH RECURSIVE）で末端（孫）から親へ逆順に安全に完全削除する。
+      // ---------------------------------------------------------------
+      getPurgeTreePreview(postId) {
+        const rootPost = toPlain(stmts.getPostWithThreadAndCategory.get(postId));
+        if (!rootPost) {
+          return { found: false };
+        }
+        const descendants = stmts.getPostDescendantsInLeafOrder.all(postId).map(toPlain);
+        return {
+          found: true,
+          rootPost,
+          thread: { id: rootPost.thread_id, title: rootPost.thread_title },
+          category: { id: rootPost.category_id, name: rootPost.category_name },
+          posts: descendants,
+          postsCount: descendants.length,
+          isSubtree: rootPost.parent_id !== null,
+        };
+      },
+
+      purgePostTree(postId) {
+        return runInTransaction(() => {
+          const rootPost = toPlain(stmts.getPostWithThreadAndCategory.get(postId));
+          if (!rootPost) {
+            return { found: false, deletedCount: 0, deletedIds: [] };
+          }
+          const descendants = stmts.getPostDescendantsInLeafOrder.all(postId).map(toPlain);
+          const deletedIds = [];
+          for (const p of descendants) {
+            stmts.deletePostById.run(p.id);
+            deletedIds.push(p.id);
+          }
+          return {
+            found: true,
+            rootPost,
+            thread: { id: rootPost.thread_id, title: rootPost.thread_title },
+            category: { id: rootPost.category_id, name: rootPost.category_name },
+            deletedCount: deletedIds.length,
+            deletedIds,
+            isSubtree: rootPost.parent_id !== null,
+          };
+        });
+      },
+
+      getPurgeThreadPreview(threadId) {
+        const thread = toPlain(stmts.getThreadWithCategory.get(threadId));
+        if (!thread) {
+          return { found: false };
+        }
+        const posts = stmts.getThreadPostsInLeafOrder.all(threadId, threadId).map(toPlain);
+        return {
+          found: true,
+          thread,
+          category: { id: thread.category_id, name: thread.category_name },
+          posts,
+          postsCount: posts.length,
+        };
+      },
+
+      purgeThread(threadId) {
+        return runInTransaction(() => {
+          const thread = toPlain(stmts.getThreadWithCategory.get(threadId));
+          if (!thread) {
+            return { found: false, deletedPostsCount: 0, deletedPostIds: [] };
+          }
+          const posts = stmts.getThreadPostsInLeafOrder.all(threadId, threadId).map(toPlain);
+          const deletedPostIds = [];
+          for (const p of posts) {
+            stmts.deletePostById.run(p.id);
+            deletedPostIds.push(p.id);
+          }
+          stmts.deleteThreadById.run(threadId);
+          return {
+            found: true,
+            deletedThread: thread,
+            category: { id: thread.category_id, name: thread.category_name },
+            deletedPostsCount: deletedPostIds.length,
+            deletedPostIds,
+          };
+        });
+      },
+
       // バックアップファイル生成（F2対策：既存バックアップを先に消さず、一時ファイルへ生成・検証後に原子的置換する）
-      backupTo(destinationPath) {
+      backupTo(destinationPath, options = {}) {
         const dest = path.resolve(destinationPath);
         if (dest === targetPath) {
           throw new Error('バックアップ先に元のDBと同じパスは指定できません。');
@@ -612,9 +752,16 @@ function createBoardDb(options = {}) {
             if (!qc || String(qc.quick_check).toLowerCase() !== 'ok') {
               throw new Error('生成されたバックアップファイルの整合性検査（quick_check）に失敗しました。');
             }
-            checkDb.prepare('SELECT COUNT(*) AS c FROM categories;').get();
+            const fk = checkDb.prepare('PRAGMA foreign_key_check;').all();
+            if (fk && fk.length > 0) {
+              throw new Error('生成されたバックアップファイルで外部キー制約違反（foreign_key_check）が検出されました。');
+            }
+            const catCount = checkDb.prepare('SELECT COUNT(*) AS c FROM categories;').get();
             checkDb.prepare('SELECT COUNT(*) AS c FROM threads;').get();
             checkDb.prepare('SELECT COUNT(*) AS c FROM posts;').get();
+            if (options.requireNonEmptyCategories && Number(catCount?.c ?? 0) === 0) {
+              throw new Error('バックアップ対象DBのカテゴリ件数が0件です。空のDBで既存バックアップを上書きすることを拒否しました。');
+            }
           } finally {
             checkDb.close();
           }

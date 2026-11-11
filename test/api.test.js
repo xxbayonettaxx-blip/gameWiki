@@ -471,4 +471,24 @@ test('F3・F5・F6回帰検証: ジャンクション脱出遮断・送信途中
   assert.equal(listOut.status, 0);
   assert.ok(listOut.stdout.includes('CLI変更後カテゴリ'));
   assert.ok(listOut.stdout.includes('CLI変更後スレッド'));
+
+  // 不正ID (12abc) の指定は parsePositiveInt により確実に拒否されること (Codex P1 回帰テスト)
+  const invalidIdOut = runMod(['purge-tree', '12abc']);
+  assert.equal(invalidIdOut.status, 1);
+  assert.ok(invalidIdOut.stderr.includes('投稿ID'));
+
+  // 物理削除プレビュー (Dry-Run): --force なしではDB変更されずプレビュー情報が出力されること
+  const dryRunOut = runMod(['purge-tree', '1']);
+  assert.equal(dryRunOut.status, 0);
+  assert.ok(dryRunOut.stdout.includes('Dry-Run'));
+
+  // 物理削除実行 (--force): 投稿ツリーが完全削除されること
+  const forceTreeOut = runMod(['purge-tree', '1', '--force']);
+  assert.equal(forceTreeOut.status, 0);
+  assert.ok(forceTreeOut.stdout.includes('SUCCESS'));
+
+  // スレッド物理削除実行 (--force): スレッドと配下投稿が完全削除されること
+  const forceThreadOut = runMod(['purge-thread', '1', '--force']);
+  assert.equal(forceThreadOut.status, 0);
+  assert.ok(forceThreadOut.stdout.includes('SUCCESS'));
 });

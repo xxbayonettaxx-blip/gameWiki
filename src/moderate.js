@@ -13,9 +13,12 @@
  *   npm run moderate -- delete <投稿ID>   # 投稿を論理削除（返信は維持、ピン留めも自動解除）
  *   npm run moderate -- pin <投稿ID>      # 投稿（＋返信ツリー）をスレッド上部にピン留め
  *   npm run moderate -- unpin <投稿ID>    # 投稿のピン留めを解除
+ *   npm run moderate -- purge-tree <投稿ID> [--force]    # 投稿ツリー物理削除（Dry-run確認 / --forceで実行）
+ *   npm run moderate -- purge-thread <スレッドID> [--force] # スレッド物理削除（全投稿・スレッド行完全削除）
  * =====================================================================
  */
 
+const fs = require('node:fs');
 const { createBoardDb, resolveProjectDbPath } = require('./db');
 const { parsePositiveInt } = require('./validators');
 
@@ -39,6 +42,8 @@ function printUsage() {
   console.error('  npm run moderate -- delete <投稿ID>');
   console.error('  npm run moderate -- pin <投稿ID>');
   console.error('  npm run moderate -- unpin <投稿ID>');
+  console.error('  npm run moderate -- purge-tree <投稿ID> [--force]');
+  console.error('  npm run moderate -- purge-thread <スレッドID> [--force]');
 }
 
 function main() {
@@ -54,6 +59,8 @@ function main() {
     'delete',
     'pin',
     'unpin',
+    'purge-tree',
+    'purge-thread',
   ];
 
   if (!validActions.includes(action)) {
@@ -62,7 +69,26 @@ function main() {
     return;
   }
 
-  const dbPath = resolveProjectDbPath(process.env.DB_PATH || './data/board.db');
+  const rawDbPath = process.env.DB_PATH || './data/board.db';
+  const dbPath = resolveProjectDbPath(rawDbPath);
+
+  // 削除系操作（purge-tree, purge-thread, delete）では、
+  // DBファイルが存在しない・0バイトの際に createBoardDb が空DBを新規作成してしまう事故を防ぐ
+  const destructiveActions = ['purge-tree', 'purge-thread', 'delete'];
+  if (destructiveActions.includes(action) && dbPath !== ':memory:') {
+    if (!fs.existsSync(dbPath)) {
+      console.error(`[MODERATE] エラー: 指定されたDBファイルが見つかりません (${dbPath})`);
+      process.exitCode = 1;
+      return;
+    }
+    const stat = fs.statSync(dbPath);
+    if (stat.size === 0) {
+      console.error(`[MODERATE] エラー: 指定されたDBファイルは空（0バイト）です (${dbPath})`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   const db = createBoardDb({ dbPath });
 
   try {
@@ -172,7 +198,105 @@ function main() {
       return;
     }
 
-    // 6. 投稿の論理削除・ピン留め切替（既存機能）
+    // 6. 投稿ツリーの物理削除（purge-tree: 親から孫まで完全削除）
+    if (action === 'purge-tree') {
+      const rawPostId = args[1];
+      if (!rawPostId) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+      const postId = parsePositiveInt(rawPostId, '投稿ID');
+      const isForce = args.includes('--force');
+
+      if (!isForce) {
+        const preview = db.getPurgeTreePreview(postId);
+        if (!preview.found) {
+          console.error(`[MODERATE] 投稿 #${postId} は見つかりませんでした。`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log('=== [MODERATE] 投稿ツリー物理削除プレビュー (Dry-Run: DBは変更されていません) ===');
+        console.log(`対象DB      : ${dbPath}`);
+        console.log(`カテゴリ    : ${preview.category.name} (ID: ${preview.category.id})`);
+        console.log(`スレッド    : ${preview.thread.title} (ID: ${preview.thread.id})`);
+        console.log(`対象投稿    : #${preview.rootPost.id} [${preview.rootPost.author_name}] (${preview.rootPost.created_at})`);
+        const snippet = preview.rootPost.content.length > 60
+          ? `${preview.rootPost.content.slice(0, 60)}...`
+          : preview.rootPost.content;
+        console.log(`本文抜粋    : "${snippet.replace(/\r?\n/g, ' ')}"`);
+        if (preview.isSubtree) {
+          console.log(`※ 警告: この投稿は親投稿ではなく返信です。この投稿および配下のツリーのみが削除され、親投稿は残ります。`);
+        }
+        console.log(`削除対象件数: 合計 ${preview.postsCount} 件（この投稿およびすべての子孫返信）`);
+        console.log(`削除順序    : ${preview.posts.map((p) => `#${p.id} (深さ: ${p.depth})`).join(' -> ')}`);
+        console.log('');
+        console.log(`※ 実際に物理削除を実行するには、末尾に --force を付けて実行してください:`);
+        console.log(`   npm run moderate -- purge-tree ${postId} --force`);
+        return;
+      }
+
+      // --force 指定時の本実行
+      const result = db.purgePostTree(postId);
+      if (!result.found) {
+        console.error(`[MODERATE] 投稿 #${postId} は見つかりませんでした。`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `[MODERATE] [SUCCESS] 投稿 #${postId} および配下の投稿 合計 ${result.deletedCount} 件を物理削除しました。`
+      );
+      console.log(`削除された投稿ID (末端順): ${result.deletedIds.map((id) => `#${id}`).join(', ')}`);
+      console.log(`対象スレッド: ${result.thread.title} (ID: ${result.thread.id})`);
+      return;
+    }
+
+    // 7. スレッドの物理削除（purge-thread: スレッド内の全投稿およびスレッド行を完全削除）
+    if (action === 'purge-thread') {
+      const rawThreadId = args[1];
+      if (!rawThreadId) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+      const threadId = parsePositiveInt(rawThreadId, 'スレッドID');
+      const isForce = args.includes('--force');
+
+      if (!isForce) {
+        const preview = db.getPurgeThreadPreview(threadId);
+        if (!preview.found) {
+          console.error(`[MODERATE] スレッド #${threadId} は見つかりませんでした。`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log('=== [MODERATE] スレッド物理削除プレビュー (Dry-Run: DBは変更されていません) ===');
+        console.log(`対象DB      : ${dbPath}`);
+        console.log(`カテゴリ    : ${preview.category.name} (ID: ${preview.category.id})`);
+        console.log(`対象スレッド: #${preview.thread.id}「${preview.thread.title}」`);
+        console.log(`配下の投稿  : 合計 ${preview.postsCount} 件`);
+        if (preview.postsCount > 0) {
+          console.log(`削除順序    : ${preview.posts.map((p) => `#${p.id}`).join(' -> ')} -> スレッド #${preview.thread.id}`);
+        }
+        console.log('');
+        console.log(`※ 実際に物理削除を実行するには、末尾に --force を付けて実行してください:`);
+        console.log(`   npm run moderate -- purge-thread ${threadId} --force`);
+        return;
+      }
+
+      // --force 指定時の本実行
+      const result = db.purgeThread(threadId);
+      if (!result.found) {
+        console.error(`[MODERATE] スレッド #${threadId} は見つかりませんでした。`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `[MODERATE] [SUCCESS] スレッド #${threadId}「${result.deletedThread.title}」および配下の投稿 ${result.deletedPostsCount} 件を物理削除しました。`
+      );
+      return;
+    }
+
+    // 8. 投稿の論理削除・ピン留め切替（既存機能）
     const rawPostId = args[1];
     if (!rawPostId) {
       printUsage();

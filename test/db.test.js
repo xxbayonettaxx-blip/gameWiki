@@ -409,3 +409,133 @@ test('投稿ピン留めと旧DBからの非破壊自動マイグレーション
   assert.equal(reSeedAfterRename.createdThreads, 0);
   assert.equal(reSeedAfterRename.createdPosts, 0);
 });
+
+test('物理削除（purge-tree / purge-thread）: 再帰CTEによる末端先行削除・他ツリー保持・整合性検証', (t) => {
+  const db = createBoardDb({ dbPath: ':memory:' });
+  t.after(() => db.close());
+  runSeed(db);
+
+  // 1. ツリー構成のテストデータを作成（スレッド 1）
+  // 親 (P1)
+  //  ├─ 子1 (C1)
+  //  │   └─ 孫1 (G1)
+  //  └─ 子2 (C2)
+  // 独立した親 (P2)
+  const p1 = db.createPost({ threadId: 1, authorName: '親1', content: '親1本文', visitorId: 'visP1' });
+  const c1 = db.createPost({ threadId: 1, parentId: p1.id, authorName: '子1', content: '子1本文', visitorId: 'visC1' });
+  const g1 = db.createPost({ threadId: 1, parentId: c1.id, authorName: '孫1', content: '孫1本文', visitorId: 'visG1' });
+  const c2 = db.createPost({ threadId: 1, parentId: p1.id, authorName: '子2', content: '子2本文', visitorId: 'visC2' });
+  const p2 = db.createPost({ threadId: 1, authorName: '親2', content: '親2本文（残るはず）', visitorId: 'visP2' });
+
+  // 2. プレビュー（Dry-Run）の検証
+  const preview = db.getPurgeTreePreview(p1.id);
+  assert.equal(preview.found, true);
+  assert.equal(preview.postsCount, 4);
+  assert.equal(preview.isSubtree, false);
+  // 深い順（孫1 -> 子 -> 親1）で取得されていること
+  assert.equal(preview.posts[0].id, g1.id);
+  assert.equal(preview.posts[preview.posts.length - 1].id, p1.id);
+
+  // プレビュー時点ではDBに一切変更がないこと
+  const threadDetailBefore = db.getThreadDetail(1);
+  const postIdsBefore = threadDetailBefore.posts.map((p) => p.id);
+  assert.ok(postIdsBefore.includes(p1.id));
+  assert.ok(postIdsBefore.includes(g1.id));
+
+  // 3. 物理削除の実行（purgePostTree）
+  const purgeRes = db.purgePostTree(p1.id);
+  assert.equal(purgeRes.found, true);
+  assert.equal(purgeRes.deletedCount, 4);
+  assert.deepEqual(purgeRes.deletedIds, [g1.id, c2.id, c1.id, p1.id]);
+
+  // 4. 削除後の検証：P1ツリーが完全に消え、P2および他スレッドは無傷で残っていること
+  const threadDetailAfter = db.getThreadDetail(1);
+  const postIdsAfter = threadDetailAfter.posts.map((p) => p.id);
+  assert.ok(!postIdsAfter.includes(p1.id));
+  assert.ok(!postIdsAfter.includes(c1.id));
+  assert.ok(!postIdsAfter.includes(g1.id));
+  assert.ok(!postIdsAfter.includes(c2.id));
+  assert.ok(postIdsAfter.includes(p2.id));
+
+  // 5. 部分ツリー削除（サブツリー削除）の検証
+  // P3 -> C3 -> G3 の構造を作り、C3 だけを削除した時に P3 は残り、C3 と G3 だけが消えること
+  const p3 = db.createPost({ threadId: 1, authorName: '親3', content: '親3本文', visitorId: 'visP3' });
+  const c3 = db.createPost({ threadId: 1, parentId: p3.id, authorName: '子3', content: '子3本文', visitorId: 'visC3' });
+  const g3 = db.createPost({ threadId: 1, parentId: c3.id, authorName: '孫3', content: '孫3本文', visitorId: 'visG3' });
+
+  const subPreview = db.getPurgeTreePreview(c3.id);
+  assert.equal(subPreview.isSubtree, true);
+  assert.equal(subPreview.postsCount, 2);
+
+  const subPurge = db.purgePostTree(c3.id);
+  assert.equal(subPurge.deletedCount, 2);
+  assert.deepEqual(subPurge.deletedIds, [g3.id, c3.id]);
+
+  const p3Check = db.getThreadDetail(1).posts.find((p) => p.id === p3.id);
+  assert.ok(p3Check, '親3は残っていること');
+
+  // 6. スレッド全体の物理削除（purgeThread）
+  const newThread = db.createThread({ categoryId: 1, title: '一時スレッド' });
+  const thPost1 = db.createPost({ threadId: newThread.id, authorName: 'テスト', content: 'スレ内投稿1', visitorId: 'v1' });
+  db.createPost({ threadId: newThread.id, parentId: thPost1.id, authorName: 'テスト', content: 'スレ内返信1', visitorId: 'v2' });
+
+  const thPreview = db.getPurgeThreadPreview(newThread.id);
+  assert.equal(thPreview.found, true);
+  assert.equal(thPreview.postsCount, 2); // 投稿1 + 返信1
+
+  const thPurge = db.purgeThread(newThread.id);
+  assert.equal(thPurge.found, true);
+  assert.equal(thPurge.deletedPostsCount, 2);
+
+  // スレッド一覧から完全に消滅していること
+  assert.equal(db.getThreadDetail(newThread.id), null);
+});
+
+test('安全バックアップ（runBackup）: 元DB欠落・0バイト・未初期化を拒否し、正常時は原子的作成すること', (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'backup-test-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const { runBackup } = require('../src/backup');
+
+  const validDbPath = path.join(tmpDir, 'valid.db');
+  const backupDestPath = path.join(tmpDir, 'backup.db');
+
+  // 1. 正常なDBを作成してseed投入
+  const validDb = createBoardDb({ dbPath: validDbPath });
+  runSeed(validDb);
+  validDb.close();
+
+  // 正常バックアップの成功
+  const res = runBackup({ srcPath: validDbPath, destPath: backupDestPath });
+  assert.equal(res.success, true);
+  assert.ok(fs.existsSync(backupDestPath));
+  assert.ok(res.sizeBytes > 0);
+
+  const initialBackupMtime = fs.statSync(backupDestPath).mtimeMs;
+
+  // 2. 元DBが存在しない場合 -> エラーになり、既存バックアップを上書き・破壊しないこと
+  assert.throws(
+    () => runBackup({ srcPath: path.join(tmpDir, 'non_existent.db'), destPath: backupDestPath }),
+    /存在しません/
+  );
+  assert.equal(fs.statSync(backupDestPath).mtimeMs, initialBackupMtime);
+
+  // 3. 元DBが0バイトの場合 -> エラーになり、既存バックアップを保護すること
+  const emptyFilePath = path.join(tmpDir, 'empty.db');
+  fs.writeFileSync(emptyFilePath, '');
+  assert.throws(
+    () => runBackup({ srcPath: emptyFilePath, destPath: backupDestPath }),
+    /0バイトです/
+  );
+  assert.equal(fs.statSync(backupDestPath).mtimeMs, initialBackupMtime);
+
+  // 4. 元DBが空スキーマ（カテゴリ0件）の場合 -> エラーになり、既存バックアップを保護すること
+  const zeroCatDbPath = path.join(tmpDir, 'zerocat.db');
+  const zeroCatDb = createBoardDb({ dbPath: zeroCatDbPath }); // schema適用のみでseed未投入
+  zeroCatDb.close();
+  assert.throws(
+    () => runBackup({ srcPath: zeroCatDbPath, destPath: backupDestPath }),
+    /カテゴリ件数が0件/
+  );
+  assert.equal(fs.statSync(backupDestPath).mtimeMs, initialBackupMtime);
+});

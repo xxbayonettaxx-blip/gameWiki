@@ -110,7 +110,8 @@ function syncStructure(db) {
     }
   }
 
-  // 3. 意図しない空のテスト用スレッド（投稿数0）があればクリーンアップ
+  // 3. 意図しない空のスレッド（投稿数0件のみ）があればクリーンアップ
+  // ※ 投稿が1件でもあるスレッドは一切自動削除せず安全に保持する（不要な場合は moderate purge-thread を使用）
   const afterCategories = db.listCategoriesWithThreads();
   const allowedMap = new Map(SEED_CATEGORIES.map((c) => [c.name, new Set(c.threads.map((t) => t.title))]));
 
@@ -120,18 +121,17 @@ function syncStructure(db) {
 
     for (const th of cat.threads) {
       if (!allowedTitles.has(th.title)) {
-        // 旧動作確認用スレッド（動作確認・フリートーク、テスト用スレッド）の整理
-        const isLegacySampleThread = ['動作確認・フリートーク', 'テスト用スレッド'].includes(th.title);
-        if (isLegacySampleThread || th.post_count === 0) {
+        if (th.post_count === 0) {
           try {
-            if (isLegacySampleThread) {
-              db.execRawForTesting(`DELETE FROM posts WHERE thread_id = ${th.id}`);
-            }
             db.execRawForTesting(`DELETE FROM threads WHERE id = ${th.id}`);
-            summary.cleanedThreads.push(`旧テスト用スレッド「${th.title}」(#${th.id}) を整理・削除`);
+            summary.cleanedThreads.push(`空の不要スレッド「${th.title}」(#${th.id}, 投稿数: 0) を整理・削除`);
           } catch {
             // 万が一FK違反等の場合は保持
           }
+        } else {
+          summary.cleanedThreads.push(
+            `※ 投稿が存在するスレッド「${th.title}」(#${th.id}, 投稿数: ${th.post_count}) は削除せず安全に保持しました`
+          );
         }
       }
     }

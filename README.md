@@ -44,6 +44,9 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 | **スレッドの追加 / 名前変更** | `npm run moderate -- add-thread <カテゴリID> "<題名>" ["案内文"]`<br>`npm run moderate -- rename-thread <ID> "<新題名>"` | 指定カテゴリ内に新しいスレッドを追加、または既存スレッドのタイトルを変更します。 |
 | **投稿のピン留め / 解除** | `npm run moderate -- pin <投稿ID>` / `unpin <投稿ID>` | 指定した投稿（＋返信ツリー）を上部のピン留め枠へ固定表示、または解除します。 |
 | **投稿の論理削除** | `npm run moderate -- delete <投稿ID>` | 指定した投稿を `is_deleted = 1` に更新（ピン留めも自動解除）します。API/画面からは本文と名前がマスクされ、子返信はそのまま読めます。 |
+| **投稿ツリーの物理削除** | `npm run moderate -- purge-tree <投稿ID> [--force]` | 指定した投稿およびその配下（子・孫すべて）のカードをDBから完全削除します。既定はDry-run（プレビュー表示のみ）、`--force` を付与して本実行します。 |
+| **スレッドの物理削除** | `npm run moderate -- purge-thread <スレッドID> [--force]` | 指定スレッド内の全投稿を末端から削除し、スレッド行も完全削除します。既定はDry-run、`--force` で本実行します。 |
+| **安全日次バックアップ** | `npm run backup` | 元DBの存在・非空・スキーマ整合性（quick_check / foreign_key_check）を検査し、安全性が実証された場合のみ原子的（atomic）にバックアップを更新します。 |
 
 ### フロントの回帰テスト
 
