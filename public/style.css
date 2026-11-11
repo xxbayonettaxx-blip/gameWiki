@@ -1143,7 +1143,6 @@ body.no-comment-bg .is-replying-target > .comment .comment-text {
   flex-direction: column;
   gap: 8px;
 }
-}
 .replies .avatar,
 .replies-flat .avatar {
   width: 24px;
@@ -1282,6 +1281,11 @@ body.composer-open .fab-write {
 
 /* シート最上部ヘッダー：閉じるボタン・モード表示・大きく目立つ送信ボタンを集約 */
 .drawer-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1320,9 +1324,8 @@ body.composer-open .fab-write {
 .drawer-sub {
   font-size: 11px;
   color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ★ ソフトキーボードで隠れない上部送信ボタン（目立つアクセント・サイズ） */
@@ -1421,6 +1424,7 @@ body.composer-open .fab-write {
   align-items: center;
   gap: 8px;
   flex: 1;
+  min-width: 0;
   font-size: 11.5px;
   font-weight: 600;
   color: var(--ink);
@@ -1432,6 +1436,8 @@ body.composer-open .fab-write {
 }
 .field-inline input {
   flex: 1;
+  min-width: 0;
+  width: 100%;
   max-width: 220px;
   height: 34px;
   padding: 4px 10px;

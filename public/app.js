@@ -7,7 +7,7 @@
  * 主なUX・保守・セキュリティ方針：
  *   1. innerHTML は不使用（createElement + textContent でHTML解釈によるXSSを防止）。
  *   2. 普段は入力欄を隠し、「新規投稿」「返信」押下時のみスライド展開。
- *      （モバイル＝下からボトムシート、PC＝右からサイドドロワー）
+ *      （モバイル＝上から入力シート、PC＝右からサイドドロワー）
  *   3. F1対策：選択要求中のスレッドID（loadingThreadId）と表示確定済みID（activeThreadId）を分離。
  *      GET取得中や取得失敗時は誤送信を防止し、表示中のスレッドと投稿先が食い違わないようにする。
  *   4. F4対策：閉じたドロワー・設定シートに inert を付与し、開いた時は即座にフォーカスを移動、
@@ -32,6 +32,7 @@
     failedTargetThread: null,   // 直近の切替GETが失敗した対象 { id, title, categoryId } | null
     posts: [],
     replyTarget: null,          // { id, name, content } | null
+    drafts: new Map(),          // threadId -> { content, replyId }（このページを開いている間だけ保持）
     composerOpen: false,
     composerTriggerEl: null,
     composerTriggerSelector: null,
@@ -288,15 +289,47 @@
     }
   }
 
+  // スレッドを確定切替する直前に保存し、通信失敗時は表示中の下書きを維持する。
+  function saveCurrentDraft() {
+    if (state.activeThreadId === null) return;
+    const content = $('#comment-body').value;
+    if (content !== '' || state.replyTarget) {
+      state.drafts.set(state.activeThreadId, {
+        content,
+        replyId: state.replyTarget?.id ?? null,
+      });
+    } else {
+      state.drafts.delete(state.activeThreadId);
+    }
+  }
+
+  function restoreThreadDraft() {
+    const draft = state.drafts.get(state.activeThreadId);
+    $('#comment-body').value = draft?.content ?? '';
+    const reply = state.posts.find((post) => post.id === draft?.replyId && post.is_deleted !== 1);
+    state.replyTarget = reply
+      ? { id: reply.id, name: reply.author_name, content: reply.content }
+      : null;
+    if (draft?.replyId !== null && draft?.replyId !== undefined && !reply) {
+      $('#form-error').textContent =
+        '下書きの返信先が見つからないため、新規投稿に切り替えました。送信前に内容を確認してください。';
+    }
+    const length = $('#comment-body').value.length;
+    $('#character-count').textContent = `${length.toLocaleString('ja-JP')} / 2,000`;
+  }
+
   function openComposer(replyPost = null, triggerEl = null) {
     if (state.settingsOpen) {
       closeSettings({ restoreFocus: false });
     }
 
     rememberTrigger(triggerEl);
-    state.replyTarget = replyPost
-      ? { id: replyPost.id, name: replyPost.author_name, content: replyPost.content }
-      : null;
+    // 入力済みの下書きを開き直すときは返信先も維持し、新規への変更は専用ボタンで行う。
+    if (replyPost) {
+      state.replyTarget = { id: replyPost.id, name: replyPost.author_name, content: replyPost.content };
+    } else if ($('#comment-body').value === '') {
+      state.replyTarget = null;
+    }
     state.composerOpen = true;
 
     if (state.failedTargetThread) {
@@ -688,12 +721,14 @@
       // 応答待ちの間に利用者が設定パネルや別要素へフォーカスを移していないかを再描画前に判定
       const restoreTriggerFocus = shouldKeepTriggerFocus(preserveFocusSelector);
 
+      const switchedThread = previousThreadId !== null && previousThreadId !== data.thread.id;
+      if (switchedThread) saveCurrentDraft();
+
       // GET成功時点で初めて表示確定スレッド（activeCategory / activeThreadId / activeThreadData）を更新する
       const confirmedMeta = findThreadMeta(data.thread.id);
       if (confirmedMeta) {
         state.activeCategory = confirmedMeta.category;
       }
-      const switchedThread = previousThreadId !== null && previousThreadId !== data.thread.id;
       state.activeThreadId = data.thread.id;
       state.activeThreadData = data.thread;
       state.loadingThreadId = null;
@@ -701,9 +736,9 @@
       state.posts = Array.isArray(data.posts) ? data.posts : [];
 
       if (switchedThread) {
-        state.replyTarget = null;
+        restoreThreadDraft();
         if (window.innerWidth < 760) {
-          closeComposer({ restoreFocus: false, clearReply: true });
+          closeComposer({ restoreFocus: false });
         }
       }
 
@@ -805,8 +840,16 @@
         throw new Error(data.error || `投稿に失敗しました (HTTP ${res.status})`);
       }
 
-      // 送信中にユーザーが本文を書き換えていない場合のみクリアする（下書き破壊防止）
-      if ($('#comment-body').value === submitContent) {
+      // 成功した送信先の下書きだけを消し、別スレッドや別の返信先での編集を保持する。
+      const submittedDraft = state.drafts.get(submitThreadId);
+      if (submittedDraft?.content === submitContent && submittedDraft.replyId === submitReplyId) {
+        state.drafts.delete(submitThreadId);
+      }
+      if (
+        state.activeThreadId === submitThreadId &&
+        (state.replyTarget?.id ?? null) === submitReplyId &&
+        $('#comment-body').value === submitContent
+      ) {
         $('#comment-body').value = '';
         $('#character-count').textContent = '0 / 2,000';
       } else {
