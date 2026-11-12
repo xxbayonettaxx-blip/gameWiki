@@ -1641,13 +1641,13 @@ dialog::backdrop {
   .site-shell {
     padding: 0 32px;
     display: grid;
-    grid-template-columns: 205px minmax(0, 1fr);
-    gap: 34px;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 30px;
     transition: padding-right 0.26s cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .sidebar {
-    padding: 32px 0 24px;
+    padding: 32px 14px 24px 0;
     display: flex;
     flex-direction: column;
     align-self: start;
@@ -1655,15 +1655,23 @@ dialog::backdrop {
     top: 78px;
     max-height: calc(100vh - 78px);
     overflow-y: auto;
+    overflow-x: hidden;
     overscroll-behavior: contain;
     scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
   }
   .sidebar::-webkit-scrollbar {
     width: 6px;
   }
+  .sidebar::-webkit-scrollbar-track {
+    background: transparent;
+  }
   .sidebar::-webkit-scrollbar-thumb {
     background: var(--line);
     border-radius: 3px;
+  }
+  .sidebar::-webkit-scrollbar-thumb:hover {
+    background: var(--muted);
   }
   .sidebar-label {
     display: flex;
