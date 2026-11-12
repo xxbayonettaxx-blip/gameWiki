@@ -259,6 +259,17 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), true);
   });
 
+  await t.test('24時間以内の新着スレッドにNEWバッジが表示され、サイドバーに説明があること', async () => {
+    // 1. スレッド一覧に .new-badge が存在すること（テスト用seedデータは直近生成）
+    const badgeCount = await evaluate("document.querySelectorAll('.thread-card .new-badge').length");
+    assert.ok(badgeCount > 0);
+
+    // 2. サイドバーの「はじめての方へ」にNEWの説明があり、3層ツリーの文言が消えていること
+    const noteText = await evaluate("document.querySelector('.sidebar-note')?.textContent || ''");
+    assert.ok(noteText.includes('NEW'));
+    assert.ok(!noteText.includes('3層'));
+  });
+
   if (process.env.FRONTEND_ARTIFACT_DIR) {
     fs.mkdirSync(process.env.FRONTEND_ARTIFACT_DIR, { recursive: true });
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });

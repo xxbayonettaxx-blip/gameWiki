@@ -63,6 +63,17 @@
     return Number.isNaN(d.getTime()) ? String(iso) : jstFormatter.format(d);
   }
 
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+  // 直近24時間以内の更新（投稿・返信またはスレッド新設）かどうかを判定
+  function isRecent(isoString) {
+    if (!isoString) return false;
+    const time = new Date(isoString).getTime();
+    if (Number.isNaN(time)) return false;
+    const diff = Date.now() - time;
+    return diff >= 0 && diff <= ONE_DAY_MS;
+  }
+
   function scrollBehavior() {
     return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
   }
@@ -414,11 +425,21 @@
         btn.dataset.catId = String(cat.id);
         btn.setAttribute('aria-current', String(Boolean(isCurrent)));
 
+        const hasNew = (cat.threads || []).some((t) => isRecent(t.latest_post_at));
         const countText = String(cat.threads?.length || 0).padStart(2, '0');
+        const catRight = el('span', 'category-right');
+        if (hasNew) {
+          const dot = el('span', 'new-dot', '●');
+          dot.setAttribute('aria-label', '新着あり');
+          dot.setAttribute('title', '24時間以内に更新あり');
+          catRight.append(dot);
+        }
+        catRight.append(el('span', 'cat-count', countText));
+
         btn.append(
           icon(pickCategoryIcon(cat.name)),
           el('span', '', cat.name),
-          el('span', 'category-right', countText)
+          catRight
         );
         return btn;
       })
@@ -440,6 +461,13 @@
           btn.setAttribute('aria-busy', 'true');
         }
         btn.append(el('strong', '', thread.title));
+
+        const isNew = isRecent(thread.latest_post_at);
+        if (isNew) {
+          const badge = el('span', 'new-badge', 'NEW');
+          badge.setAttribute('aria-label', '24時間以内に更新');
+          btn.append(badge);
+        }
 
         if (selected) {
           const check = el('span', 'check', '✓');

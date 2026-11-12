@@ -744,6 +744,39 @@ legend {
   height: 12px;
 }
 
+/* ★ 24時間以内の新着表示（NEWバッジ） */
+.new-badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 1px 6px;
+  background: #ff5722;
+  color: #ffffff;
+  font-family: Arial, sans-serif;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  border-radius: 4px;
+  line-height: 1.4;
+  box-shadow: 0 1px 3px rgba(255, 87, 34, 0.35);
+}
+
+/* ★ カテゴリ一覧側の新着ドット（●） */
+.new-dot {
+  display: inline-block;
+  color: #ff5722;
+  font-size: 8px;
+  line-height: 1;
+  margin-right: 2px;
+  animation: pulse-dot 2.4s infinite ease-in-out;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
 /* ---------------------------------------------------------------------
  * 6. スレッド本文・ピン留め投稿ツリー・通常投稿ツリー・返信ハイライト
  * --------------------------------------------------------------------- */

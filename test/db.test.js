@@ -595,3 +595,31 @@ test('スレッド表示順（display_order）と並び替え: 作成時の自�
     db.close();
   }
 });
+
+test('スレッド最新活動日時（latest_post_at）: スレッド作成日時または最新の未削除投稿日時が取得できること', () => {
+  const db = createBoardDb({ dbPath: ':memory:' });
+  try {
+    const cat = db.createCategory({ name: '新着テストカテゴリ' });
+    const th = db.createThread({ categoryId: cat.id, title: '新着スレッド' });
+
+    // 投稿がない時はスレッド作成日時と一致
+    let list = db.listCategoriesWithThreads();
+    let thread = list[0].threads[0];
+    assert.ok(thread.latest_post_at);
+    assert.equal(thread.latest_post_at, th.created_at);
+
+    // 新規投稿を追加すると latest_post_at がその投稿の日時に更新されること
+    const p1 = db.createPost({
+      threadId: th.id,
+      authorName: 'テスト投稿者',
+      visitorId: 'visitor-new',
+      content: '新着投稿のテストです',
+    });
+
+    list = db.listCategoriesWithThreads();
+    thread = list[0].threads[0];
+    assert.equal(thread.latest_post_at, p1.created_at);
+  } finally {
+    db.close();
+  }
+});

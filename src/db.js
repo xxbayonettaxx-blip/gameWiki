@@ -119,7 +119,8 @@ function createBoardDb(options = {}) {
           t.is_pinned,
           t.display_order,
           t.created_at,
-          COUNT(p.id) AS post_count
+          COUNT(p.id) AS post_count,
+          COALESCE(MAX(CASE WHEN p.is_deleted = 0 THEN p.created_at END), t.created_at) AS latest_post_at
         FROM threads t
         LEFT JOIN posts p ON p.thread_id = t.id
         GROUP BY t.id
