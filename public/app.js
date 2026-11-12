@@ -319,6 +319,11 @@
   }
 
   function openComposer(replyPost = null, triggerEl = null) {
+    if (state.activeThreadId === null) {
+      notify('スレッドが選択されていないため投稿できません。');
+      return;
+    }
+
     if (state.settingsOpen) {
       closeSettings({ restoreFocus: false });
     }
@@ -566,6 +571,16 @@
   }
 
   function renderAllPosts() {
+    if (state.activeThreadId === null) {
+      $('#pinned-section').hidden = true;
+      $('#comment-count').textContent = '0';
+      $('#comments').replaceChildren(
+        el('p', 'empty-message', 'このカテゴリにはまだスレッドが登録されていません。管理コマンド等でスレッドを作成してください。')
+      );
+      syncReplyingTargetHighlight();
+      return;
+    }
+
     const roots = buildTrees(state.posts);
     const pinnedRoots = [];
     const normalRoots = [];
@@ -627,6 +642,9 @@
 
     if (state.activeThreadData) {
       $('#thread-title').textContent = state.activeThreadData.title;
+    } else {
+      $('#thread-title').textContent = 'スレッドがありません';
+      $('#thread-label').textContent = 'THREAD --';
     }
     syncComposerHeader();
   }
@@ -930,6 +948,21 @@
       const focusSel = `#categories button[data-cat-id="${catId}"]`;
       if (targetThreadId !== null) {
         await loadThread(targetThreadId, { preserveFocusSelector: focusSel });
+      } else {
+        // スレッドが0件のカテゴリが選択された場合
+        state.activeCategory = found;
+        state.activeThreadId = null;
+        state.activeThreadData = null;
+        state.posts = [];
+        state.loadingThreadId = null;
+        state.failedTargetThread = null;
+        if (state.composerOpen) {
+          closeComposer({ restoreFocus: false });
+        }
+        renderNavigation();
+        syncHeaders();
+        renderAllPosts();
+        syncSubmitAvailability();
       }
     });
 

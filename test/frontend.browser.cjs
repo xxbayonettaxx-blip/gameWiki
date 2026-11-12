@@ -235,6 +235,30 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.equal(sidebarStyle.position, 'sticky');
   });
 
+  await t.test('✕ボタンおよび外側（バックドロップ）クリックで入力欄が隠れること', async () => {
+    // 1. 新規投稿を開く
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), true);
+    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), false);
+
+    // 2. ✕ボタン（#composer-close）を押すと閉じる
+    await click('#composer-close');
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), false);
+    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), true);
+
+    // 3. 再び開き、外側（#composer-backdrop）をクリックすると閉じる
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), true);
+
+    await click('#composer-backdrop');
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), false);
+    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), true);
+  });
+
   if (process.env.FRONTEND_ARTIFACT_DIR) {
     fs.mkdirSync(process.env.FRONTEND_ARTIFACT_DIR, { recursive: true });
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });

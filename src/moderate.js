@@ -8,6 +8,7 @@
  *   npm run moderate -- list
  *   npm run moderate -- add-category "<カテゴリ名>" [表示順]
  *   npm run moderate -- rename-category <カテゴリID> "<新しいカテゴリ名>" [表示順]
+ *   npm run moderate -- reorder-category <カテゴリID> <表示順>
  *   npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"] [表示順]
  *   npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>" [表示順]
  *   npm run moderate -- reorder-thread <スレッドID> <表示順>
@@ -38,6 +39,7 @@ function printUsage() {
   console.error('  npm run moderate -- list');
   console.error('  npm run moderate -- add-category "<カテゴリ名>" [表示順]');
   console.error('  npm run moderate -- rename-category <カテゴリID> "<新しいカテゴリ名>" [表示順]');
+  console.error('  npm run moderate -- reorder-category <カテゴリID> <表示順>');
   console.error('  npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"] [表示順]');
   console.error('  npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>" [表示順]');
   console.error('  npm run moderate -- reorder-thread <スレッドID> <表示順>');
@@ -56,6 +58,7 @@ function main() {
     'list',
     'add-category',
     'rename-category',
+    'reorder-category',
     'add-thread',
     'rename-thread',
     'reorder-thread',
@@ -154,6 +157,29 @@ function main() {
       }
       console.log(
         `[MODERATE] カテゴリ #${res.category.id} を「${res.category.name}」（表示順: ${res.category.display_order}）へ更新しました。`
+      );
+      return;
+    }
+
+    // 4. 既存カテゴリの表示順変更（名前変更なし）
+    if (action === 'reorder-category') {
+      const rawCatId = args[1];
+      const rawOrder = args[2];
+      if (!rawCatId || rawOrder === undefined) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+      const categoryId = parsePositiveInt(rawCatId, 'カテゴリID');
+      const displayOrder = parseNonNegativeInt(rawOrder, '表示順');
+      const res = db.updateCategory({ categoryId, displayOrder });
+      if (!res.found) {
+        console.error(`[MODERATE] カテゴリ #${categoryId} は見つかりませんでした。`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `[MODERATE] カテゴリ #${res.category.id}「${res.category.name}」の表示順を ${res.category.display_order} へ変更しました。`
       );
       return;
     }

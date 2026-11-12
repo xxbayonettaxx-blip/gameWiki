@@ -1241,12 +1241,13 @@ body.composer-open .fab-write {
   transform: translateY(14px);
 }
 
-/* ★ 背景スクロール対応：backdrop は pointer-events: none で背面操作・スクロールを阻害しない */
+/* ★ 外側クリックで閉じる（キャンセル）用バックドロップ：背景は透明のままクリック判定を有効化 */
 .drawer-backdrop {
   position: fixed;
   inset: 0;
   background: transparent;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
   z-index: 80;
 }
 
@@ -1292,6 +1293,33 @@ body.composer-open .fab-write {
   gap: 10px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
+}
+
+/* ★ キャンセル／閉じるボタン：押しやすい背景・枠線・ホバーフィードバックで目立たせる */
+#composer-close {
+  min-width: 36px;
+  min-height: 36px;
+  border-radius: 8px;
+  background: var(--surface-alt);
+  border: 1.5px solid var(--line);
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+#composer-close:hover {
+  background: var(--danger-bg);
+  border-color: var(--danger-line);
+  color: var(--danger-ink);
+  transform: scale(1.04);
+}
+#composer-close:active {
+  transform: scale(0.96);
 }
 
 .drawer-title-group {
@@ -1832,9 +1860,9 @@ dialog::backdrop {
     bottom: 28px;
   }
 
-  /* ★ PC時の投稿ドロワー：これまで通り右側からスライドインし、左のスレッドを読みながら書ける設計 */
+  /* ★ PC時の投稿ドロワー：右側スライドイン時も外側クリックで閉じられるようにする（背景は透明） */
   .drawer-backdrop {
-    display: none !important;
+    display: block;
   }
 
   .composer-drawer {
