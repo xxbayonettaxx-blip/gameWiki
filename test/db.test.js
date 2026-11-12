@@ -539,3 +539,59 @@ test('安全バックアップ（runBackup）: 元DB欠落・0バイト・未初
   );
   assert.equal(fs.statSync(backupDestPath).mtimeMs, initialBackupMtime);
 });
+
+test('スレッド表示順（display_order）と並び替え: 作成時の自動採番・明示指定・updateThreadによる順序変更・ピン留め優先ソート', () => {
+  const db = createBoardDb({ dbPath: ':memory:' });
+  try {
+    const cat = db.createCategory({ name: '順序テストカテゴリ', displayOrder: 1 });
+
+    // 1. displayOrder未指定で順次作成した場合、1, 2, 3 と自動採番されること
+    const th1 = db.createThread({ categoryId: cat.id, title: 'スレッド1' });
+    const th2 = db.createThread({ categoryId: cat.id, title: 'スレッド2' });
+    const th3 = db.createThread({ categoryId: cat.id, title: 'スレッド3' });
+    assert.equal(th1.display_order, 1);
+    assert.equal(th2.display_order, 2);
+    assert.equal(th3.display_order, 3);
+
+    // 2. 表示順の並び順確認（通常時は display_order ASC, id ASC）
+    let list = db.listCategoriesWithThreads();
+    let threadTitles = list[0].threads.map((t) => t.title);
+    assert.deepEqual(threadTitles, ['スレッド1', 'スレッド2', 'スレッド3']);
+
+    // 3. updateThread でスレッド3の表示順を 0（最前）に変更
+    const updatedTh3 = db.updateThread({ threadId: th3.id, displayOrder: 0 });
+    assert.equal(updatedTh3.found, true);
+    assert.equal(updatedTh3.thread.display_order, 0);
+
+    list = db.listCategoriesWithThreads();
+    threadTitles = list[0].threads.map((t) => t.title);
+    assert.deepEqual(threadTitles, ['スレッド3', 'スレッド1', 'スレッド2']);
+
+    // 4. ピン留めスレッドは display_order に関係なく最優先で先頭に来ること
+    const thPinned = db.createThread({
+      categoryId: cat.id,
+      title: 'ピン留めスレッド',
+      pinnedText: 'お知らせ',
+      isPinned: true,
+      displayOrder: 99,
+    });
+    assert.equal(thPinned.is_pinned, 1);
+    assert.equal(thPinned.display_order, 99);
+
+    list = db.listCategoriesWithThreads();
+    threadTitles = list[0].threads.map((t) => t.title);
+    assert.deepEqual(threadTitles, ['ピン留めスレッド', 'スレッド3', 'スレッド1', 'スレッド2']);
+
+    // 5. 不正な表示順の拒否
+    assert.throws(
+      () => db.createThread({ categoryId: cat.id, title: '不正スレッド', displayOrder: -1 }),
+      /0以上の整数/
+    );
+    assert.throws(
+      () => db.updateThread({ threadId: th1.id, displayOrder: 3.5 }),
+      /0以上の整数/
+    );
+  } finally {
+    db.close();
+  }
+});

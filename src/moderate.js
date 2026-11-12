@@ -8,8 +8,9 @@
  *   npm run moderate -- list
  *   npm run moderate -- add-category "<カテゴリ名>" [表示順]
  *   npm run moderate -- rename-category <カテゴリID> "<新しいカテゴリ名>" [表示順]
- *   npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"]
- *   npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>"
+ *   npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"] [表示順]
+ *   npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>" [表示順]
+ *   npm run moderate -- reorder-thread <スレッドID> <表示順>
  *   npm run moderate -- delete <投稿ID>   # 投稿を論理削除（返信は維持、ピン留めも自動解除）
  *   npm run moderate -- pin <投稿ID>      # 投稿（＋返信ツリー）をスレッド上部にピン留め
  *   npm run moderate -- unpin <投稿ID>    # 投稿のピン留めを解除
@@ -37,8 +38,9 @@ function printUsage() {
   console.error('  npm run moderate -- list');
   console.error('  npm run moderate -- add-category "<カテゴリ名>" [表示順]');
   console.error('  npm run moderate -- rename-category <カテゴリID> "<新しいカテゴリ名>" [表示順]');
-  console.error('  npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"]');
-  console.error('  npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>"');
+  console.error('  npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"] [表示順]');
+  console.error('  npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>" [表示順]');
+  console.error('  npm run moderate -- reorder-thread <スレッドID> <表示順>');
   console.error('  npm run moderate -- delete <投稿ID>');
   console.error('  npm run moderate -- pin <投稿ID>');
   console.error('  npm run moderate -- unpin <投稿ID>');
@@ -56,6 +58,7 @@ function main() {
     'rename-category',
     'add-thread',
     'rename-thread',
+    'reorder-thread',
     'delete',
     'pin',
     'unpin',
@@ -107,7 +110,7 @@ function main() {
         } else {
           for (const th of cat.threads) {
             const pinMark = th.is_pinned ? ' [固定]' : '';
-            console.log(`   └ [スレッド #${th.id}] ${th.title}${pinMark} (投稿数: ${th.post_count})`);
+            console.log(`   └ [スレッド #${th.id}] ${th.title}${pinMark} (表示順: ${th.display_order ?? 0}, 投稿数: ${th.post_count})`);
           }
         }
       }
@@ -160,41 +163,71 @@ function main() {
       const rawCatId = args[1];
       const title = args[2];
       const pinnedText = args[3] ?? null;
+      const rawOrder = args[4];
       if (!rawCatId || !title) {
         printUsage();
         process.exitCode = 1;
         return;
       }
       const categoryId = parsePositiveInt(rawCatId, 'カテゴリID');
+      const displayOrder = rawOrder !== undefined ? parseNonNegativeInt(rawOrder, '表示順') : null;
       const created = db.createThread({
         categoryId,
         title,
         pinnedText,
         isPinned: Boolean(pinnedText && String(pinnedText).trim() !== ''),
+        displayOrder,
       });
       console.log(
-        `[MODERATE] カテゴリ #${created.category_id} にスレッド #${created.id}「${created.title}」を追加しました。`
+        `[MODERATE] カテゴリ #${created.category_id} にスレッド #${created.id}「${created.title}」（表示順: ${created.display_order}）を追加しました。`
       );
       return;
     }
 
-    // 5. 既存スレッドのタイトル変更
+    // 5. 既存スレッドのタイトル・表示順変更
     if (action === 'rename-thread') {
       const rawThreadId = args[1];
       const newTitle = args[2];
+      const rawOrder = args[3];
       if (!rawThreadId || !newTitle) {
         printUsage();
         process.exitCode = 1;
         return;
       }
       const threadId = parsePositiveInt(rawThreadId, 'スレッドID');
-      const res = db.updateThread({ threadId, title: newTitle });
+      const displayOrder = rawOrder !== undefined ? parseNonNegativeInt(rawOrder, '表示順') : undefined;
+      const res = db.updateThread({ threadId, title: newTitle, displayOrder });
       if (!res.found) {
         console.error(`[MODERATE] スレッド #${threadId} は見つかりませんでした。`);
         process.exitCode = 1;
         return;
       }
-      console.log(`[MODERATE] スレッド #${res.thread.id} のタイトルを「${res.thread.title}」へ更新しました。`);
+      console.log(
+        `[MODERATE] スレッド #${res.thread.id} を「${res.thread.title}」（表示順: ${res.thread.display_order}）へ更新しました。`
+      );
+      return;
+    }
+
+    // 6. 既存スレッドの表示順変更（タイトル変更なし）
+    if (action === 'reorder-thread') {
+      const rawThreadId = args[1];
+      const rawOrder = args[2];
+      if (!rawThreadId || rawOrder === undefined) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+      const threadId = parsePositiveInt(rawThreadId, 'スレッドID');
+      const displayOrder = parseNonNegativeInt(rawOrder, '表示順');
+      const res = db.updateThread({ threadId, displayOrder });
+      if (!res.found) {
+        console.error(`[MODERATE] スレッド #${threadId} は見つかりませんでした。`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `[MODERATE] スレッド #${res.thread.id}「${res.thread.title}」の表示順を ${res.thread.display_order} へ変更しました。`
+      );
       return;
     }
 

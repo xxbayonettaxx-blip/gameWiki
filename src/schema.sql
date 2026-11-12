@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS threads (
     pinned_text TEXT
         CHECK(pinned_text IS NULL OR length(pinned_text) <= 500),
     is_pinned INTEGER NOT NULL DEFAULT 0 CHECK(is_pinned IN (0, 1)),
+    display_order INTEGER NOT NULL DEFAULT 0,
     created_by INTEGER,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
@@ -67,5 +68,5 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 
 -- 5. 検索・一覧取得用インデックス
-CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category_id, is_pinned DESC, id);
+CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category_id, is_pinned DESC, display_order ASC, id);
 CREATE INDEX IF NOT EXISTS idx_posts_thread_parent ON posts(thread_id, parent_id, id);

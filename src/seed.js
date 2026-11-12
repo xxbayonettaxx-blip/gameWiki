@@ -27,6 +27,7 @@ const SEED_CATEGORIES = [
       {
         title: '雑談',
         isPinned: true,
+        displayOrder: 1,
         pinnedText:
           'ここは誰でも気軽に書き込める雑談スレッドです。\n誹謗中傷や個人情報の書き込みは控え、互いに配慮した交流をお願いします。',
         samplePosts: [
@@ -57,6 +58,7 @@ const SEED_CATEGORIES = [
       {
         title: '質問、初心者質問',
         isPinned: true,
+        displayOrder: 2,
         pinnedText:
           '質問する際は「どの場面で困っているか」「試したこと」を添えると回答がつきやすくなります。\n回答は該当の質問投稿の「返信」ボタンから繋げてください。',
         samplePosts: [
@@ -79,6 +81,7 @@ const SEED_CATEGORIES = [
       {
         title: 'あいさつ・自己紹介',
         isPinned: false,
+        displayOrder: 3,
         pinnedText: null,
         samplePosts: [
           {
@@ -98,24 +101,28 @@ const SEED_CATEGORIES = [
       {
         title: '育成',
         isPinned: true,
+        displayOrder: 1,
         pinnedText: 'キャラクターや装備の育成・強化に関する情報共有スレッドです。',
         samplePosts: [],
       },
       {
         title: '塵煙前線',
         isPinned: true,
+        displayOrder: 2,
         pinnedText: '塵煙前線の攻略・編成相談スレッドです。',
         samplePosts: [],
       },
       {
         title: '開拓征途',
         isPinned: true,
+        displayOrder: 3,
         pinnedText: '開拓征途の攻略・マップ情報共有スレッドです。',
         samplePosts: [],
       },
       {
         title: '他',
         isPinned: false,
+        displayOrder: 4,
         pinnedText: null,
         samplePosts: [],
       },
@@ -128,18 +135,21 @@ const SEED_CATEGORIES = [
       {
         title: '今期のイベント',
         isPinned: true,
+        displayOrder: 1,
         pinnedText: '現在開催中の最新イベントに関する攻略・情報交換スレッドです。',
         samplePosts: [],
       },
       {
         title: '時期イベント',
         isPinned: false,
+        displayOrder: 2,
         pinnedText: null,
         samplePosts: [],
       },
       {
         title: '先行サーバー情報',
         isPinned: false,
+        displayOrder: 3,
         pinnedText: '先行サーバー（CN/海外版等）の情報や先行実装要素に関するスレッドです。ネタバレに配慮してご活用ください。',
         samplePosts: [],
       },

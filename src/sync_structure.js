@@ -89,11 +89,11 @@ function syncStructure(db) {
           if (legacyThread.catId && legacyThread.catId !== targetCatId) {
             // カテゴリ移動が必要な場合（DB直接更新）
             db.execRawForTesting(
-              `UPDATE threads SET category_id = ${targetCatId}, title = '${threadDef.title.replace(/'/g, "''")}' WHERE id = ${legacyThread.id}`
+              `UPDATE threads SET category_id = ${targetCatId}, title = '${threadDef.title.replace(/'/g, "''")}', display_order = ${threadDef.displayOrder ?? 0} WHERE id = ${legacyThread.id}`
             );
             summary.movedThreads.push(`「${legacyThread.title}」→ カテゴリ「${catDef.name}」の「${threadDef.title}」(#${legacyThread.id})`);
           } else {
-            db.updateThread({ threadId: legacyThread.id, title: threadDef.title });
+            db.updateThread({ threadId: legacyThread.id, title: threadDef.title, displayOrder: threadDef.displayOrder });
             summary.renamedThreads.push(`「${legacyThread.title}」→「${threadDef.title}」(#${legacyThread.id})`);
           }
         } else {
@@ -103,8 +103,14 @@ function syncStructure(db) {
             title: threadDef.title,
             pinnedText: threadDef.pinnedText,
             isPinned: Boolean(threadDef.isPinned),
+            displayOrder: threadDef.displayOrder,
           });
           summary.createdThreads.push(`カテゴリ「${catDef.name}」に「${created.title}」(#${created.id})`);
+        }
+      } else {
+        // 既存スレッドの表示順更新
+        if (threadDef.displayOrder !== undefined && thread.display_order !== threadDef.displayOrder) {
+          db.updateThread({ threadId: thread.id, displayOrder: threadDef.displayOrder });
         }
       }
     }
@@ -174,7 +180,7 @@ function main() {
       console.log(`[カテゴリ #${c.id}] ${c.name} (表示順: ${c.display_order})`);
       for (const t of c.threads) {
         const pin = t.is_pinned ? ' [固定]' : '';
-        console.log(`   └ [スレッド #${t.id}] ${t.title}${pin} (投稿数: ${t.post_count})`);
+        console.log(`   └ [スレッド #${t.id}] ${t.title}${pin} (表示順: ${t.display_order ?? 0}, 投稿数: ${t.post_count})`);
       }
     }
   } finally {

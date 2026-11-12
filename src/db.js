@@ -69,19 +69,25 @@ function createBoardDb(options = {}) {
     // 同時アクセス時の即時ロックエラー（SQLITE_BUSY）を緩和するため最大5秒待機
     sqlite.exec('PRAGMA busy_timeout = 5000;');
 
-    // スキーマ正本（PRAGMA foreign_keys = ON, WAL, 4テーブル, インデックス）を読み込んで適用
-    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    sqlite.exec(schemaSql);
-
-    // 既存DBからの非破壊アップグレード：posts テーブルに is_pinned 列が無い場合は自動追加する
-    // （CREATE TABLE IF NOT EXISTS は既存テーブルの列を増やさないため、実データを消さずに移行する処理）
+    // 既存DBからの非破壊アップグレード：既存テーブルが存在する場合、不足カラムを先にALTER TABLEで追加
+    // （CREATE TABLE IF NOT EXISTS は既存テーブルの列を増やさないため、インデックス作成前に実行する）
     const postColumns = sqlite.prepare('PRAGMA table_info(posts);').all();
-    const hasIsPinned = postColumns.some((col) => col.name === 'is_pinned');
-    if (!hasIsPinned) {
+    if (postColumns.length > 0 && !postColumns.some((col) => col.name === 'is_pinned')) {
       sqlite.exec(
         'ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0 CHECK(is_pinned IN (0, 1));'
       );
     }
+
+    const threadColumns = sqlite.prepare('PRAGMA table_info(threads);').all();
+    if (threadColumns.length > 0 && !threadColumns.some((col) => col.name === 'display_order')) {
+      sqlite.exec(
+        'ALTER TABLE threads ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;'
+      );
+    }
+
+    // スキーマ正本（PRAGMA foreign_keys = ON, WAL, 4テーブル, インデックス）を読み込んで適用
+    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+    sqlite.exec(schemaSql);
 
     // 接続ごとに必須の外部キー制約を再度明示ONにし、実際に有効化されたか戻り値を検証する
     sqlite.exec('PRAGMA foreign_keys = ON;');
@@ -111,16 +117,17 @@ function createBoardDb(options = {}) {
           t.category_id,
           t.title,
           t.is_pinned,
+          t.display_order,
           t.created_at,
           COUNT(p.id) AS post_count
         FROM threads t
         LEFT JOIN posts p ON p.thread_id = t.id
         GROUP BY t.id
-        ORDER BY t.category_id ASC, t.is_pinned DESC, t.id ASC
+        ORDER BY t.category_id ASC, t.is_pinned DESC, t.display_order ASC, t.id ASC
       `),
 
       getThreadById: sqlite.prepare(`
-        SELECT id, category_id, title, pinned_text, is_pinned, created_at
+        SELECT id, category_id, title, pinned_text, is_pinned, display_order, created_at
         FROM threads
         WHERE id = ?
       `),
@@ -218,12 +225,15 @@ function createBoardDb(options = {}) {
       findThreadByCategoryAndTitle: sqlite.prepare(`
         SELECT id, title FROM threads WHERE category_id = ? AND title = ?
       `),
+      getMaxThreadOrderInCategory: sqlite.prepare(`
+        SELECT COALESCE(MAX(display_order), 0) AS max_order FROM threads WHERE category_id = ?
+      `),
       insertThread: sqlite.prepare(`
-        INSERT INTO threads (category_id, title, pinned_text, is_pinned)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO threads (category_id, title, pinned_text, is_pinned, display_order)
+        VALUES (?, ?, ?, ?, ?)
       `),
       updateThreadById: sqlite.prepare(`
-        UPDATE threads SET title = ?, pinned_text = ?, is_pinned = ? WHERE id = ?
+        UPDATE threads SET title = ?, pinned_text = ?, is_pinned = ?, display_order = ? WHERE id = ?
       `),
 
       // 物理削除（purge-tree / purge-thread）用のステートメント
@@ -257,7 +267,7 @@ function createBoardDb(options = {}) {
 
       getThreadWithCategory: sqlite.prepare(`
         SELECT
-          t.id, t.category_id, t.title, t.pinned_text, t.is_pinned, t.created_at,
+          t.id, t.category_id, t.title, t.pinned_text, t.is_pinned, t.display_order, t.created_at,
           c.name AS category_name
         FROM threads t
         JOIN categories c ON c.id = t.category_id
@@ -514,8 +524,8 @@ function createBoardDb(options = {}) {
         });
       },
 
-      // 管理者による新規スレッド追加（所属カテゴリの実在確認＋タイトル1〜100文字＋案内文500文字以内検査）
-      createThread({ categoryId, title, pinnedText = null, isPinned = false }) {
+      // 管理者による新規スレッド追加（所属カテゴリの実在確認＋タイトル1〜100文字＋案内文500文字以内検査＋表示順採番）
+      createThread({ categoryId, title, pinnedText = null, isPinned = false, displayOrder = null }) {
         return runInTransaction(() => {
           const category = stmts.getCategoryById.get(categoryId);
           if (!category) {
@@ -530,6 +540,17 @@ function createBoardDb(options = {}) {
             throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
           }
 
+          let orderVal;
+          if (displayOrder === null || displayOrder === undefined) {
+            const maxRow = stmts.getMaxThreadOrderInCategory.get(categoryId);
+            orderVal = Number(maxRow?.max_order ?? 0) + 1;
+          } else {
+            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
+              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
+            }
+            orderVal = displayOrder;
+          }
+
           let normalizedPinText = null;
           if (pinnedText !== null && pinnedText !== undefined && String(pinnedText).trim() !== '') {
             const textStr = String(pinnedText).replace(/\r\n?/g, '\n').trim();
@@ -540,7 +561,7 @@ function createBoardDb(options = {}) {
           }
 
           const pinFlag = isPinned || normalizedPinText !== null ? 1 : 0;
-          const info = stmts.insertThread.run(categoryId, trimmedTitle, normalizedPinText, pinFlag);
+          const info = stmts.insertThread.run(categoryId, trimmedTitle, normalizedPinText, pinFlag, orderVal);
           const newThreadId = Number(info.lastInsertRowid);
 
           // 案内文が指定された場合は、現行UIの「ピン留めされた投稿・返信」枠にも表示されるよう初期ピン留め投稿を作成する
@@ -559,21 +580,35 @@ function createBoardDb(options = {}) {
         });
       },
 
-      // 管理者による既存スレッドのタイトル変更（配下の投稿ツリーは一切失われずそのまま維持される）
-      updateThread({ threadId, title }) {
+      // 管理者による既存スレッドのタイトル・表示順変更（配下の投稿ツリーは一切失われずそのまま維持される）
+      updateThread({ threadId, title = undefined, displayOrder = undefined }) {
         return runInTransaction(() => {
           const existing = stmts.getThreadById.get(threadId);
           if (!existing) {
             return { found: false, thread: null };
           }
-          if (typeof title !== 'string' || /[\x00-\x1F\x7F]/.test(title)) {
-            throw new ValidationError('スレッドタイトルに使用できない制御文字が含まれているか、形式が不正です。', 400);
+
+          let nextTitle = existing.title;
+          if (title !== undefined && title !== null) {
+            if (typeof title !== 'string' || /[\x00-\x1F\x7F]/.test(title)) {
+              throw new ValidationError('スレッドタイトルに使用できない制御文字が含まれているか、形式が不正です。', 400);
+            }
+            const trimmedTitle = title.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
+            if (trimmedTitle.length < 1 || trimmedTitle.length > 100) {
+              throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
+            }
+            nextTitle = trimmedTitle;
           }
-          const trimmedTitle = title.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
-          if (trimmedTitle.length < 1 || trimmedTitle.length > 100) {
-            throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
+
+          let nextOrder = existing.display_order ?? 0;
+          if (displayOrder !== undefined && displayOrder !== null) {
+            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
+              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
+            }
+            nextOrder = displayOrder;
           }
-          stmts.updateThreadById.run(trimmedTitle, existing.pinned_text, existing.is_pinned, threadId);
+
+          stmts.updateThreadById.run(nextTitle, existing.pinned_text, existing.is_pinned, nextOrder, threadId);
           return {
             found: true,
             thread: toPlain(stmts.getThreadById.get(threadId)),
@@ -614,7 +649,8 @@ function createBoardDb(options = {}) {
                 catRow.id,
                 threadDef.title,
                 threadDef.pinnedText ?? null,
-                threadDef.isPinned ? 1 : 0
+                threadDef.isPinned ? 1 : 0,
+                threadDef.displayOrder ?? 0
               );
               const newThreadId = Number(threadInfo.lastInsertRowid);
               createdThreads += 1;
