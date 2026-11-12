@@ -1653,7 +1653,17 @@ dialog::backdrop {
     align-self: start;
     position: sticky;
     top: 78px;
-    min-height: calc(100vh - 78px);
+    max-height: calc(100vh - 78px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+  .sidebar::-webkit-scrollbar {
+    width: 6px;
+  }
+  .sidebar::-webkit-scrollbar-thumb {
+    background: var(--line);
+    border-radius: 3px;
   }
   .sidebar-label {
     display: flex;

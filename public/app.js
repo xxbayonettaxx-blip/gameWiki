@@ -634,6 +634,12 @@
   // -------------------------------------------------------------------
   // 7. API通信：カテゴリ取得 ＆ スレッド詳細取得（F1: 確定IDと要求中IDの分離）
   // -------------------------------------------------------------------
+  function getThreadIdFromHash() {
+    const hash = window.location.hash || '';
+    const match = hash.match(/^#thread-(\d+)$/i) || hash.match(/^#th-(\d+)$/i);
+    return match ? Number(match[1]) : null;
+  }
+
   async function loadInitialData() {
     showErrorBanner('');
     try {
@@ -648,13 +654,22 @@
         return;
       }
 
-      state.activeCategory = state.categories[0];
-      const firstThread = state.activeCategory.threads?.[0];
+      // URLハッシュ（#thread-X）があれば該当スレッドを優先復元し、なければ先頭スレッドを開く
+      const hashThreadId = getThreadIdFromHash();
+      const initialMeta = hashThreadId ? findThreadMeta(hashThreadId) : null;
+
+      if (initialMeta) {
+        state.activeCategory = initialMeta.category;
+      } else {
+        state.activeCategory = state.categories[0];
+      }
+
+      const targetThread = initialMeta ? initialMeta.thread : state.activeCategory.threads?.[0];
       renderNavigation();
       syncHeaders();
 
-      if (firstThread) {
-        await loadThread(firstThread.id);
+      if (targetThread) {
+        await loadThread(targetThread.id);
       } else {
         syncSubmitAvailability();
       }
@@ -750,6 +765,12 @@
       renderNavigation();
       syncHeaders();
       renderAllPosts();
+
+      // URLハッシュを #thread-<id> に同期（リロードや共有リンクで同一スレッドを復元できるようにする）
+      const threadHash = `#thread-${data.thread.id}`;
+      if (window.location.hash !== threadHash) {
+        history.replaceState(null, '', threadHash);
+      }
 
       if (restoreTriggerFocus) {
         $(preserveFocusSelector)?.focus({ preventScroll: true });
@@ -929,6 +950,14 @@
 
       const focusSel = `#threads button[data-thread-id="${threadId}"]`;
       await loadThread(threadId, { preserveFocusSelector: focusSel });
+    });
+
+    // ブラウザの「戻る / 進む」履歴やハッシュ変更に対応
+    window.addEventListener('hashchange', () => {
+      const targetId = getThreadIdFromHash();
+      if (targetId && targetId !== state.activeThreadId && state.loadingThreadId === null) {
+        loadThread(targetId);
+      }
     });
 
     // 投稿内の「返信」ボタン ＆ 「>>親番号ジャンプ」

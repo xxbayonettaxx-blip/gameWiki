@@ -218,6 +218,23 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 480, deviceScaleFactor: 1, mobile: true });
   });
 
+  await t.test('URLハッシュ(#thread-X)およびリロードで選択中スレッドが復元されること', async () => {
+    await send('Emulation.setDeviceMetricsOverride', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: url + '#thread-2' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '質問、初心者質問'");
+    assert.equal(await evaluate("document.querySelector('#thread-title')?.textContent"), '質問、初心者質問');
+    assert.equal(await evaluate("location.hash"), '#thread-2');
+
+    // サイドバーの独立スクロール設定 (max-height, overflow-y: auto) が反映されていること
+    const sidebarStyle = await evaluate(`(() => {
+      const sb = document.querySelector('.sidebar');
+      const cs = window.getComputedStyle(sb);
+      return { overflowY: cs.overflowY, position: cs.position };
+    })()`);
+    assert.equal(sidebarStyle.overflowY, 'auto');
+    assert.equal(sidebarStyle.position, 'sticky');
+  });
+
   if (process.env.FRONTEND_ARTIFACT_DIR) {
     fs.mkdirSync(process.env.FRONTEND_ARTIFACT_DIR, { recursive: true });
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });
