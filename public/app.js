@@ -805,7 +805,21 @@
 
       if (state.activeCategory) {
         const tSummary = state.activeCategory.threads.find((t) => t.id === data.thread.id);
-        if (tSummary) tSummary.post_count = state.posts.length;
+        if (tSummary) {
+          tSummary.post_count = state.posts.length;
+          // 最新の未削除投稿日時（0件時はスレッド作成日時）を同期し、投稿直後や更新時にNEW表示を即時反映する
+          let latestAt = data.thread.created_at || tSummary.latest_post_at || null;
+          let latestMs = latestAt ? Date.parse(latestAt) : NaN;
+          for (const p of state.posts) {
+            if (p.is_deleted || !p.created_at) continue;
+            const ms = Date.parse(p.created_at);
+            if (!Number.isNaN(ms) && (Number.isNaN(latestMs) || ms > latestMs)) {
+              latestMs = ms;
+              latestAt = p.created_at;
+            }
+          }
+          if (latestAt) tSummary.latest_post_at = latestAt;
+        }
       }
 
       renderNavigation();

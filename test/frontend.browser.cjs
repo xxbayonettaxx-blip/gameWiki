@@ -270,6 +270,35 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.ok(!noteText.includes('3層'));
   });
 
+  await t.test('古いスレッドへの投稿直後・更新ボタン押下直後にF5なしでNEWバッジが即時点灯すること', async () => {
+    // 全スレッド・全投稿を2020年に戻してNEWがない状態を作る
+    db.execRawForTesting("UPDATE posts SET created_at = '2020-01-01T00:00:00.000Z'");
+    db.execRawForTesting("UPDATE threads SET created_at = '2020-01-01T00:00:00.000Z'");
+    await send('Page.navigate', { url: url + '?testNewSync=1#thread-1' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談' && document.querySelectorAll('.thread-card .new-badge').length === 0");
+    assert.equal(await evaluate("document.querySelectorAll('.category-button .new-dot').length"), 0);
+
+    // 1. 投稿直後にF5なしでNEWバッジとカテゴリドットが即時表示されること
+    await click('#write-comment');
+    await write('NEW_IMMEDIATE_TEST');
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#submit-button').disabled && document.querySelector('#comment-body').value === ''");
+    assert.equal(await evaluate("!!document.querySelector('.thread-card[data-thread-id=\"1\"] .new-badge')"), true);
+    assert.equal(await evaluate("!!document.querySelector('.category-button[aria-current=\"true\"] .new-dot')"), true);
+
+    // 2. 別スレッドに切り替えた状態でDBに直接別ユーザーの投稿を追加し、更新ボタン(#reload-thread)でNEWが点灯すること
+    const otherThreadId = await evaluate("Number(document.querySelectorAll('.thread-card')[1]?.dataset.threadId)");
+    assert.ok(otherThreadId > 1);
+    await click(`.thread-card[data-thread-id="${otherThreadId}"]`);
+    await waitFor(`document.querySelector('.thread-card[data-thread-id="${otherThreadId}"]')?.getAttribute('aria-pressed') === 'true'`);
+    assert.equal(await evaluate(`!!document.querySelector('.thread-card[data-thread-id="${otherThreadId}"] .new-badge')`), false);
+
+    db.createPost({ threadId: otherThreadId, authorName: '他ユーザー', visitorId: 'OTHERUSER1', content: 'OTHER_USER_POST' });
+    await click('#reload-thread');
+    await waitFor(`!!document.querySelector('.thread-card[data-thread-id="${otherThreadId}"] .new-badge')`);
+    assert.equal(await evaluate(`!!document.querySelector('.thread-card[data-thread-id="${otherThreadId}"] .new-badge')`), true);
+  });
+
   if (process.env.FRONTEND_ARTIFACT_DIR) {
     fs.mkdirSync(process.env.FRONTEND_ARTIFACT_DIR, { recursive: true });
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });
