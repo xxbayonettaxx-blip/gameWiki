@@ -1243,6 +1243,10 @@ body.no-comment-bg .is-replying-target > .comment .comment-text {
   letter-spacing: 1px;
   margin-left: auto;
 }
+.footer-copy {
+  font: 10px Arial, sans-serif;
+  letter-spacing: 0.4px;
+}
 
 /* ---------------------------------------------------------------------
  * 7. フローティング投稿ボタン ＆ スライド式投稿ドロワー（モバイル＝下から）

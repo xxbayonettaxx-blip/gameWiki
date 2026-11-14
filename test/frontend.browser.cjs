@@ -268,6 +268,10 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     const noteText = await evaluate("document.querySelector('.sidebar-note')?.textContent || ''");
     assert.ok(noteText.includes('NEW'));
     assert.ok(!noteText.includes('3層'));
+
+    // 3. フッターに著作権表記が表示されていること
+    const footerText = await evaluate("document.querySelector('.page-footer')?.textContent || ''");
+    assert.ok(footerText.includes('© 2026 KoohiQK'));
   });
 
   await t.test('古いスレッドへの投稿直後・更新ボタン押下直後にF5なしでNEWバッジが即時点灯すること', async () => {
