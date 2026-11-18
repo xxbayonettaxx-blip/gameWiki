@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { createBoardDb } = require('../src/db');
 const { runSeed } = require('../src/seed');
 
@@ -622,4 +623,95 @@ test('スレッド最新活動日時（latest_post_at）: スレッド作成日�
   } finally {
     db.close();
   }
+});
+
+test('投稿の編集（updatePost）および管理CLI（edit-post）: 本文・投稿者名変更、ツリー/ピン維持、異常系拒否を確認', (t) => {
+  const db = createBoardDb({ dbPath: ':memory:' });
+  t.after(() => db.close());
+
+  const cat = db.createCategory({ name: '編集テストカテゴリ' });
+  const th = db.createThread({ categoryId: cat.id, title: '編集テストスレッド' });
+  const parent = db.createPost({
+    threadId: th.id,
+    authorName: '元の投稿者',
+    visitorId: 'vis-orig',
+    content: '修正前の本文です',
+  });
+  db.setPostPinned(parent.id, true);
+  const reply = db.createPost({
+    threadId: th.id,
+    parentId: parent.id,
+    authorName: '返信者',
+    visitorId: 'vis-reply',
+    content: '返信本文です',
+  });
+
+  // 1. 本文のみ更新（投稿者名・parent_id・is_pinned・visitor_id・created_atが維持されること）
+  const edit1 = db.updatePost({ postId: parent.id, content: '修正後の\r\n本文です  ' });
+  assert.equal(edit1.found, true);
+  assert.equal(edit1.post.content, '修正後の\n本文です');
+  assert.equal(edit1.post.author_name, '元の投稿者');
+  assert.equal(edit1.post.is_pinned, 1);
+  assert.equal(edit1.post.visitor_id, 'vis-orig');
+  assert.equal(edit1.post.created_at, parent.created_at);
+
+  // 返信ツリーが維持されていること
+  const editReply = db.updatePost({ postId: reply.id, content: '返信の修正後本文', authorName: '変更後返信者' });
+  assert.equal(editReply.found, true);
+  assert.equal(editReply.post.parent_id, parent.id);
+  assert.equal(editReply.post.author_name, '変更後返信者');
+
+  // 2. 存在しないID・不正ID・論理削除済み・不正本文の拒否
+  assert.equal(db.updatePost({ postId: 99999, content: '存在しない' }).found, false);
+  assert.throws(() => db.updatePost({ postId: 'abc', content: '不正ID' }), /1以上の整数/);
+  assert.throws(() => db.updatePost({ postId: parent.id, content: '   \u3000\n ' }), /空白や改行のみ/);
+  assert.throws(() => db.updatePost({ postId: parent.id, content: 'あ'.repeat(2001) }), /2000文字以内/);
+  assert.throws(() => db.updatePost({ postId: parent.id, content: '不正\x00文字' }), /制御文字/);
+
+  db.softDeletePost(reply.id);
+  assert.throws(() => db.updatePost({ postId: reply.id, content: '削除済み編集' }), /論理削除済み/);
+
+  // 3. 一時DBに対する管理CLI (src/moderate.js edit-post) の子プロセス実行検証
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'moderate-edit-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const cliDbPath = path.join(tmpDir, 'cli_edit.db');
+  const cliDb = createBoardDb({ dbPath: cliDbPath });
+  const cliCat = cliDb.createCategory({ name: 'CLIカテゴリ' });
+  const cliTh = cliDb.createThread({ categoryId: cliCat.id, title: 'CLIスレッド' });
+  const cliPost = cliDb.createPost({
+    threadId: cliTh.id,
+    authorName: 'CLI初期名',
+    visitorId: 'vis-cli',
+    content: 'CLI初期本文',
+  });
+  cliDb.close();
+
+  const moderateScript = path.resolve(__dirname, '../src/moderate.js');
+  const stdout = execFileSync(
+    process.execPath,
+    [moderateScript, 'edit-post', String(cliPost.id), 'CLI更新本文', 'CLI更新名'],
+    { env: { ...process.env, DB_PATH: cliDbPath }, encoding: 'utf8' }
+  );
+  assert.match(stdout, /更新しました/);
+
+  const verifyDb = createBoardDb({ dbPath: cliDbPath });
+  try {
+    const detail = verifyDb.getThreadDetail(cliTh.id);
+    assert.equal(detail.posts[0].content, 'CLI更新本文');
+    assert.equal(detail.posts[0].author_name, 'CLI更新名');
+  } finally {
+    verifyDb.close();
+  }
+
+  // 未存在DBに対して edit-post を実行した場合は空DBを自動作成せず拒否すること
+  const missingDbPath = path.join(tmpDir, 'missing.db');
+  assert.throws(
+    () =>
+      execFileSync(process.execPath, [moderateScript, 'edit-post', '1', '誤爆防止'], {
+        env: { ...process.env, DB_PATH: missingDbPath },
+        stdio: 'pipe',
+      })
+  );
+  assert.equal(fs.existsSync(missingDbPath), false);
 });

@@ -12,6 +12,7 @@
  *   npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"] [表示順]
  *   npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>" [表示順]
  *   npm run moderate -- reorder-thread <スレッドID> <表示順>
+ *   npm run moderate -- edit-post <投稿ID> "<新しい本文>" ["<新しい投稿者名>"]
  *   npm run moderate -- delete <投稿ID>   # 投稿を論理削除（返信は維持、ピン留めも自動解除）
  *   npm run moderate -- pin <投稿ID>      # 投稿（＋返信ツリー）をスレッド上部にピン留め
  *   npm run moderate -- unpin <投稿ID>    # 投稿のピン留めを解除
@@ -43,6 +44,7 @@ function printUsage() {
   console.error('  npm run moderate -- add-thread <カテゴリID> "<スレッドタイトル>" ["案内文"] [表示順]');
   console.error('  npm run moderate -- rename-thread <スレッドID> "<新しいスレッドタイトル>" [表示順]');
   console.error('  npm run moderate -- reorder-thread <スレッドID> <表示順>');
+  console.error('  npm run moderate -- edit-post <投稿ID> "<新しい本文>" ["<新しい投稿者名>"]');
   console.error('  npm run moderate -- delete <投稿ID>');
   console.error('  npm run moderate -- pin <投稿ID>');
   console.error('  npm run moderate -- unpin <投稿ID>');
@@ -62,6 +64,7 @@ function main() {
     'add-thread',
     'rename-thread',
     'reorder-thread',
+    'edit-post',
     'delete',
     'pin',
     'unpin',
@@ -78,9 +81,9 @@ function main() {
   const rawDbPath = process.env.DB_PATH || './data/board.db';
   const dbPath = resolveProjectDbPath(rawDbPath);
 
-  // 削除系操作（purge-tree, purge-thread, delete）では、
+  // 削除系・既存更新系操作（purge-tree, purge-thread, delete, edit-post）では、
   // DBファイルが存在しない・0バイトの際に createBoardDb が空DBを新規作成してしまう事故を防ぐ
-  const destructiveActions = ['purge-tree', 'purge-thread', 'delete'];
+  const destructiveActions = ['purge-tree', 'purge-thread', 'delete', 'edit-post'];
   if (destructiveActions.includes(action) && dbPath !== ':memory:') {
     if (!fs.existsSync(dbPath)) {
       console.error(`[MODERATE] エラー: 指定されたDBファイルが見つかりません (${dbPath})`);
@@ -355,7 +358,30 @@ function main() {
       return;
     }
 
-    // 8. 投稿の論理削除・ピン留め切替（既存機能）
+    // 8. 通常コメント（投稿）の本文・投稿者名変更
+    if (action === 'edit-post') {
+      const rawPostId = args[1];
+      const newContent = args[2];
+      const newAuthorName = args[3];
+      if (!rawPostId || newContent === undefined) {
+        printUsage();
+        process.exitCode = 1;
+        return;
+      }
+      const postId = parsePositiveInt(rawPostId, '投稿ID');
+      const res = db.updatePost({ postId, content: newContent, authorName: newAuthorName });
+      if (!res.found) {
+        console.error(`[MODERATE] 投稿 #${postId} は見つかりませんでした。`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        `[MODERATE] 投稿 #${res.post.id}（カテゴリ: ${res.post.category_name} / スレッド: ${res.post.thread_title} / 投稿者: ${res.post.author_name}）を更新しました。`
+      );
+      return;
+    }
+
+    // 9. 投稿の論理削除・ピン留め切替（既存機能）
     const rawPostId = args[1];
     if (!rawPostId) {
       printUsage();

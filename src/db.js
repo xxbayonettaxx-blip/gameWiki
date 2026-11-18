@@ -15,7 +15,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { ValidationError } = require('./validators');
+const { ValidationError, parsePositiveInt, validatePostInput } = require('./validators');
 
 // プロジェクトルートおよびスキーマ正本のパス（カレントディレクトリに依存しない __dirname 基準）
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -204,6 +204,12 @@ function createBoardDb(options = {}) {
       updatePostPinned: sqlite.prepare(`
         UPDATE posts
         SET is_pinned = ?
+        WHERE id = ?
+      `),
+
+      updatePostById: sqlite.prepare(`
+        UPDATE posts
+        SET content = ?, author_name = ?
         WHERE id = ?
       `),
 
@@ -451,6 +457,35 @@ function createBoardDb(options = {}) {
           const nextVal = isPinned ? 1 : 0;
           stmts.updatePostPinned.run(nextVal, postId);
           return { found: true, isPinned: Boolean(nextVal) };
+        });
+      },
+
+      // 管理者による通常コメント（投稿）の本文・投稿者名変更
+      // 返信ツリー（parent_id）・ピン留め・visitor_id・作成日時は維持し、論理削除済み投稿の編集は拒否する
+      updatePost({ postId, content, authorName = undefined }) {
+        const validPostId = parsePositiveInt(postId, '投稿ID');
+        return runInTransaction(() => {
+          const existing = toPlain(stmts.getPostWithThreadAndCategory.get(validPostId));
+          if (!existing) {
+            return { found: false, previousPost: null, post: null };
+          }
+          if (existing.is_deleted === 1) {
+            throw new ValidationError('論理削除済みの投稿は編集できません。', 400);
+          }
+
+          const validated = validatePostInput({
+            thread_id: existing.thread_id,
+            parent_id: existing.parent_id,
+            author_name: authorName !== undefined ? authorName : existing.author_name,
+            content,
+          });
+
+          stmts.updatePostById.run(validated.content, validated.authorName, validPostId);
+          return {
+            found: true,
+            previousPost: existing,
+            post: toPlain(stmts.getPostWithThreadAndCategory.get(validPostId)),
+          };
         });
       },
 
