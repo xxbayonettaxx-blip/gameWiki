@@ -258,10 +258,10 @@ svg.icon {
   max-width: 1440px;
   height: 100%;
   margin: 0 auto;
-  padding: 0 16px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
 }
 
 .brand {
@@ -305,28 +305,208 @@ svg.icon {
   display: none;
 }
 
-.settings-trigger {
+.header-actions {
   margin-left: auto;
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.auth-trigger,
+.settings-trigger {
+  display: flex;
+  gap: 6px;
   align-items: center;
   justify-content: center;
   background: rgba(255, 255, 255, 0.07);
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 6px;
-  min-width: 42px;
-  min-height: 42px;
-  padding: 0 10px;
-  font-size: 12px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0 9px;
+  font-size: 11px;
   color: #f5f5fc;
+}
+.auth-trigger.is-logged-in {
+  border-color: #a79bdb;
+  background: rgba(167, 155, 219, 0.18);
+}
+.auth-trigger span {
+  max-width: 68px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .settings-trigger span {
   display: none;
 }
+.auth-trigger:hover,
+.auth-trigger[aria-expanded="true"],
 .settings-trigger:hover,
 .settings-trigger[aria-expanded="true"] {
   background: rgba(255, 255, 255, 0.16);
   border-color: #b8acf3;
+}
+
+/* 認証シート（表示設定シートと同じ上スライドUIを共有） */
+.auth-sheet {
+  z-index: 76;
+}
+.auth-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  margin-bottom: 14px;
+}
+.auth-tab {
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.auth-tab[aria-selected="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 520px;
+}
+.auth-form h3 {
+  font-size: 14px;
+  margin-top: 6px;
+}
+.auth-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.auth-field input {
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-alt);
+  color: var(--ink);
+  font-size: 14px;
+}
+.auth-field-hint,
+.auth-note {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.button-secondary {
+  background: var(--surface-alt);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.button-secondary:hover {
+  border-color: var(--accent);
+}
+.button-secondary.button-small {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 11px;
+}
+.member-status-card {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  margin-bottom: 14px;
+  max-width: 520px;
+}
+.member-status-card strong {
+  font-size: 15px;
+  margin-right: 8px;
+}
+.role-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border: 1px solid var(--line);
+}
+.must-change-banner,
+.composer-alert-box {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 12px;
+  max-width: 520px;
+}
+.composer-alert-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.composer-auth-note {
+  font-size: 11px;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-radius: 5px;
+  padding: 6px 8px;
+}
+.field-inline input[readonly] {
+  opacity: 0.85;
+  cursor: default;
+}
+.member-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  letter-spacing: 0.03em;
 }
 
 /* ---------------------------------------------------------------------
@@ -1682,8 +1862,16 @@ dialog::backdrop {
     width: 15px;
   }
 
+  .auth-trigger,
   .settings-trigger {
+    min-width: 42px;
+    min-height: 42px;
     padding: 0 14px;
+    font-size: 12px;
+    gap: 8px;
+  }
+  .auth-trigger span {
+    max-width: 160px;
   }
   .settings-trigger span {
     display: inline;

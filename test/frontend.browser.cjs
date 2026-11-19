@@ -12,6 +12,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { createBoardDb } = require('../src/db');
 const { runSeed } = require('../src/seed');
 const { createApp } = require('../src/app');
+const { createScryptQueue } = require('../src/auth');
 
 test('実ブラウザで下書き・遅延応答・入力シートを検証する', { timeout: 60000 }, async (t) => {
   const browserPath = process.env.CHROME_PATH || [
@@ -24,7 +25,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'board-browser-test-'));
   const db = createBoardDb({ dbPath: ':memory:' });
   runSeed(db);
-  const server = createApp({ db, idSecret: 'frontend_browser_test_secret_32chars', quiet: true });
+  const server = createApp({ db, idSecret: 'frontend_browser_test_secret_32chars', devInsecureCookie: true, quiet: true });
   let holdPostResponse = false;
   let finishPost = null;
   let failThread = null;
@@ -301,6 +302,206 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await click('#reload-thread');
     await waitFor(`!!document.querySelector('.thread-card[data-thread-id="${otherThreadId}"] .new-badge')`);
     assert.equal(await evaluate(`!!document.querySelector('.thread-card[data-thread-id="${otherThreadId}"] .new-badge')`), true);
+  });
+
+  await t.test('会員登録・会員投稿・リロード維持・セッション切れ下書き保護・仮パスワード変更・ログアウトを実ブラウザで検証する', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+
+    await send('Page.navigate', { url: url + '?authTest=1#thread-1' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+
+    // 1. 新規登録してログイン状態になり、パスワード欄がクリアされること
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-tab-register');
+    await setField('#register-username', 'ブラウザ会員');
+    await setField('#register-password', 'browser-pass-1234');
+    await setField('#register-password-confirm', 'browser-pass-1234');
+    await evaluate("document.querySelector('#register-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ブラウザ会員' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#register-password').value"), '');
+    assert.equal(await evaluate("document.querySelector('#register-password-confirm').value"), '');
+
+    // 2. 会員として投稿すると名前欄が固定され、会員バッジ付きで表示され、リロード後も維持されること
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#author-name').value"), 'ブラウザ会員');
+    assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), true);
+
+    await write('会員投稿テスト本文');
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#submit-button').disabled && document.querySelector('#comment-body').value === ''");
+    assert.ok(await evaluate("document.querySelectorAll('.member-badge').length >= 1"));
+    assert.ok(await evaluate("document.body.textContent.includes('会員投稿テスト本文')"));
+
+    await send('Page.navigate', { url: url + '?authReload=1#thread-1' });
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ブラウザ会員' && document.querySelectorAll('.member-badge').length >= 1");
+
+    // 3. 投稿前にセッションが切れた場合：401 SESSION_EXPIRED で下書きを保持し、選択後に匿名投稿できること
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    await write('セッション切れでも消えない下書き');
+    db.revokeAllSessionsByUsername('ブラウザ会員');
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+
+    await waitFor("!document.querySelector('#session-expired-box').hidden");
+    assert.equal(await evaluate("document.querySelector('#comment-body').value"), 'セッション切れでも消えない下書き');
+    assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'ログイン');
+    assert.equal(db.getThreadDetail(1).posts.some((p) => p.content === 'セッション切れでも消えない下書き'), false);
+
+    await click('#expired-anon-btn');
+    await waitFor("document.querySelector('#session-expired-box').hidden && document.querySelector('#comment-body').value === ''");
+    const anonRecovered = db.getThreadDetail(1).posts.find((p) => p.content === 'セッション切れでも消えない下書き');
+    assert.ok(anonRecovered);
+    assert.equal(anonRecovered.is_member, false);
+
+    // 4. 管理者仮パスワード設定後の強制変更UI・投稿ブロック・変更完了後の再ログイン＆ログアウト
+    const tempHash = await createScryptQueue().hashPassword('temp-browser-1234');
+    db.resetPasswordByUsername({ username: 'ブラウザ会員', newPasswordHash: tempHash });
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-tab-login');
+    await setField('#login-username', 'ブラウザ会員');
+    await setField('#login-password', 'temp-browser-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+
+    await waitFor("!document.querySelector('#auth-member-panel').hidden && !document.querySelector('#must-change-banner').hidden");
+    assert.equal(await evaluate("document.querySelector('#logout-button').disabled"), false);
+
+    await click('#auth-close');
+    await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#write-comment');
+    await waitFor("!document.querySelector('#composer-must-change-box').hidden");
+    assert.equal(await evaluate("document.querySelector('#submit-button').disabled"), true);
+
+    await click('#composer-open-password-btn');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#current-password', 'temp-browser-1234');
+    await setField('#new-password', 'final-browser-5678');
+    await setField('#new-password-confirm', 'final-browser-5678');
+    await evaluate("document.querySelector('#password-form').requestSubmit()");
+
+    await waitFor("!document.querySelector('#auth-guest-panel').hidden && document.querySelector('#auth-open-label').textContent === 'ログイン'");
+    assert.equal(await evaluate("document.querySelector('#current-password').value"), '');
+    assert.equal(await evaluate("document.querySelector('#new-password').value"), '');
+    assert.equal(await evaluate("document.querySelector('#new-password-confirm').value"), '');
+
+    await setField('#login-username', 'ブラウザ会員');
+    await setField('#login-password', 'final-browser-5678');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ブラウザ会員' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+  });
+
+  await t.test('レビュー回帰(F1/F3): ログアウト失敗時に成功誤表示しないこと・非BMP会員名での登録と投稿', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+
+    await send('Page.navigate', { url: url + '?reviewRegression=1#thread-1' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+
+    // F1-1: ログアウト用アカウント登録 -> 503失敗時に「ログアウトしました。」にならずログイン維持されること
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-tab-register');
+    await setField('#register-username', 'f1_logout_user');
+    await setField('#register-password', 'logout-pass-1234');
+    await setField('#register-password-confirm', 'logout-pass-1234');
+    await evaluate("document.querySelector('#register-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'f1_logout_user' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#current-password', 'unsent-secret-pass');
+    await evaluate(`
+      window.__origFetch = window.fetch.bind(window);
+      window.fetch = (input, options) =>
+        String(input).includes('api/auth/logout')
+          ? Promise.resolve(new Response(JSON.stringify({ error: '一時的な過負荷です' }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' },
+            }))
+          : window.__origFetch(input, options);
+    `);
+    await click('#logout-button');
+    await waitFor("document.querySelector('#logout-error').textContent.length > 0 && !document.querySelector('#logout-button').disabled");
+
+    const f1State503 = await evaluate(`(async () => ({
+      label: document.querySelector('#auth-open-label').textContent,
+      toast: document.querySelector('#toast').textContent,
+      logoutError: document.querySelector('#logout-error').textContent,
+      sheetOpen: document.querySelector('#auth-sheet').classList.contains('is-open'),
+      currentPw: document.querySelector('#current-password').value,
+      meUser: (await (await window.__origFetch('api/auth/me')).json()).user?.username || null,
+    }))()`);
+    assert.notEqual(f1State503.toast, 'ログアウトしました。');
+    assert.equal(f1State503.label, 'f1_logout_user');
+    assert.equal(f1State503.meUser, 'f1_logout_user');
+    assert.equal(f1State503.sheetOpen, true);
+    assert.equal(f1State503.currentPw, '');
+    assert.ok(f1State503.logoutError.includes('過負荷'));
+
+    // F1-2: 通信全断（logoutもmeも通信エラー）で状態不明のときは匿名状態へ降格させないこと
+    await evaluate(`
+      window.fetch = (input) =>
+        (String(input).includes('api/auth/logout') || String(input).includes('api/auth/me'))
+          ? Promise.reject(new TypeError('Failed to fetch'))
+          : window.__origFetch(input);
+    `);
+    await click('#logout-button');
+    await waitFor("document.querySelector('#logout-error').textContent.includes('通信エラー') && !document.querySelector('#logout-button').disabled");
+    assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'f1_logout_user');
+    assert.equal(await evaluate("document.querySelector('#auth-sheet').classList.contains('is-open')"), true);
+    assert.notEqual(await evaluate("document.querySelector('#toast').textContent"), 'ログアウトしました。');
+
+    // F1-3: サーバー側ではセッション失効済み＋logout応答だけロストした場合は me 再照会で正しく未ログインへ同期すること
+    db.revokeAllSessionsByUsername('f1_logout_user');
+    await evaluate(`
+      window.fetch = (input, options) =>
+        String(input).includes('api/auth/logout')
+          ? Promise.reject(new TypeError('Failed to fetch'))
+          : window.__origFetch(input, options);
+    `);
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await evaluate('window.fetch = window.__origFetch');
+
+    // F3: 非BMP Unicode（絵文字16個 = UTF-16 32単位）で画面登録 -> 投稿 -> リロード維持できること
+    const emojiUser = '😀'.repeat(16);
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-tab-register');
+    await setField('#register-username', emojiUser);
+    await setField('#register-password', 'emoji-pass-1234');
+    await setField('#register-password-confirm', 'emoji-pass-1234');
+    assert.equal(await evaluate("document.querySelector('#register-username').value"), emojiUser);
+    await evaluate("document.querySelector('#register-form').requestSubmit()");
+    await waitFor(`document.querySelector('#auth-open-label')?.textContent === ${JSON.stringify(emojiUser)} && !document.querySelector('#auth-sheet').classList.contains('is-open')`);
+
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#author-name').value"), emojiUser);
+    await write('絵文字名での会員投稿本文');
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#submit-button').disabled && document.querySelector('#comment-body').value === ''");
+
+    await send('Page.navigate', { url: url + '?reviewEmojiReload=1#thread-1' });
+    await waitFor(`document.querySelector('#auth-open-label')?.textContent === ${JSON.stringify(emojiUser)} && document.body.textContent.includes('絵文字名での会員投稿本文')`);
+    assert.ok(await evaluate("document.querySelectorAll('.member-badge').length >= 1"));
   });
 
   if (process.env.FRONTEND_ARTIFACT_DIR) {

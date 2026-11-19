@@ -715,3 +715,219 @@ test('投稿の編集（updatePost）および管理CLI（edit-post）: 本文�
   );
   assert.equal(fs.existsSync(missingDbPath), false);
 });
+
+test('認証DB移行・トランザクション・世代検証(R1)・セッション上限・会員投稿保護・復元安全', (t) => {
+  const { DatabaseSync } = require('node:sqlite');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'basic-board-auth-db-'));
+  let db = null;
+  t.after(() => {
+    try {
+      db?.close();
+    } catch {
+      // ignore close errors
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 3 });
+  });
+
+  // 1. 既存 v0.5 DB（auth_version / must_change_password / sessions 無し）からの移行
+  const v05DbPath = path.join(tmpDir, 'v05.db');
+  const legacyRaw = new DatabaseSync(v05DbPath);
+  legacyRaw.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE TABLE categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      display_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE TABLE threads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category_id INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      pinned_text TEXT,
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      display_order INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT,
+      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+    CREATE TABLE posts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id INTEGER NOT NULL,
+      parent_id INTEGER,
+      author_name TEXT NOT NULL DEFAULT '名無しさん',
+      visitor_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      UNIQUE (id, thread_id),
+      FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE RESTRICT,
+      FOREIGN KEY (parent_id, thread_id) REFERENCES posts(id, thread_id) ON DELETE RESTRICT,
+      FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+    INSERT INTO categories (name, display_order) VALUES ('v05カテゴリ', 1);
+    INSERT INTO threads (category_id, title) VALUES (1, 'v05スレッド');
+    INSERT INTO posts (thread_id, author_name, visitor_id, content) VALUES (1, '旧住民', 'legacy01', '既存投稿を維持');
+  `);
+  legacyRaw.close();
+
+  db = createBoardDb({ dbPath: v05DbPath });
+
+  assert.equal(db.getStatus().schemaVersion, 2);
+  const migratedPosts = db.getThreadDetail(1).posts;
+  assert.equal(migratedPosts.length, 1);
+  assert.equal(migratedPosts[0].content, '既存投稿を維持');
+  assert.equal(migratedPosts[0].is_member, false);
+
+  // 2. 登録＋初回セッションの1トランザクション・重複409・途中失敗ロールバック確認
+  const nowIso = '2026-11-19T10:00:00.000Z';
+  const expIso = '2026-11-26T10:00:00.000Z';
+  const tHash1 = 'a'.repeat(64);
+  const createdUser = db.createUserWithSession({
+    username: 'alice',
+    passwordHash: 'hash-v1',
+    role: 'user',
+    tokenHash: tHash1,
+    expiresAt: expIso,
+    nowIso,
+  });
+  assert.equal(createdUser.username, 'alice');
+  assert.equal(createdUser.role, 'user');
+  assert.equal(createdUser.mustChangePassword, false);
+
+  // 重複登録 -> 409
+  assert.throws(
+    () =>
+      db.createUserWithSession({
+        username: 'alice',
+        passwordHash: 'hash-v1',
+        tokenHash: 'b'.repeat(64),
+        expiresAt: expIso,
+        nowIso,
+      }),
+    (err) => err.statusCode === 409
+  );
+
+  // セッション挿入がチェック制約等で失敗した場合にユーザーだけ中途半端に残らないこと
+  assert.throws(() =>
+    db.createUserWithSession({
+      username: 'bob_partial',
+      passwordHash: 'hash-v1',
+      tokenHash: 'short_invalid',
+      expiresAt: expIso,
+      nowIso,
+    })
+  );
+  assert.equal(db.getUserForAuthByUsername('bob_partial'), null);
+
+  // 3. 最大5セッション制御（6件目で最古セッションが自動削除されること）＋世代不一致拒否
+  for (let i = 2; i <= 6; i += 1) {
+    const res = db.issueSessionIfVersionMatches({
+      userId: createdUser.id,
+      expectedAuthVersion: 0,
+      tokenHash: String(i).repeat(64),
+      expiresAt: expIso,
+      nowIso: `2026-11-19T10:00:0${i}.000Z`,
+      maxSessions: 5,
+    });
+    assert.equal(res.issued, true);
+  }
+  // 1件目('a'.repeat(64))が押し出されて消え、2..6件目が残ること
+  assert.equal(db.getSessionAuthByTokenHash(tHash1, nowIso), null);
+  assert.ok(db.getSessionAuthByTokenHash('2'.repeat(64), nowIso) !== null);
+  assert.ok(db.getSessionAuthByTokenHash('6'.repeat(64), nowIso) !== null);
+
+  // 世代不一致ではセッション発行を拒否すること
+  const staleIssue = db.issueSessionIfVersionMatches({
+    userId: createdUser.id,
+    expectedAuthVersion: 99,
+    tokenHash: 'c'.repeat(64),
+    expiresAt: expIso,
+    nowIso,
+  });
+  assert.equal(staleIssue.issued, false);
+  assert.equal(db.getSessionAuthByTokenHash('c'.repeat(64), nowIso), null);
+
+  // 4. R1: changePasswordIfUnchanged は世代不一致や単独logout後に更新を拒否すること
+  db.deleteSessionByTokenHash('2'.repeat(64));
+  const revokedChange = db.changePasswordIfUnchanged({
+    userId: createdUser.id,
+    expectedAuthVersion: 0,
+    sessionTokenHash: '2'.repeat(64),
+    newPasswordHash: 'hash-stolen-override',
+    nowIso,
+  });
+  assert.deepEqual(revokedChange, { updated: false, reason: 'SESSION_INVALID' });
+
+  const mismatchChange = db.changePasswordIfUnchanged({
+    userId: createdUser.id,
+    expectedAuthVersion: 99,
+    sessionTokenHash: '6'.repeat(64),
+    newPasswordHash: 'hash-stale-override',
+    nowIso,
+  });
+  assert.deepEqual(mismatchChange, { updated: false, reason: 'AUTH_VERSION_MISMATCH' });
+
+  // 正常な変更はハッシュ更新・must_change_password=0・世代加算・全セッション削除を一括実施
+  const okChange = db.changePasswordIfUnchanged({
+    userId: createdUser.id,
+    expectedAuthVersion: 0,
+    sessionTokenHash: '6'.repeat(64),
+    newPasswordHash: 'hash-v2',
+    nowIso,
+  });
+  assert.deepEqual(okChange, { updated: true });
+  assert.equal(db.getSessionAuthByTokenHash('6'.repeat(64), nowIso), null);
+  assert.equal(db.getSessionAuthByTokenHash('5'.repeat(64), nowIso), null);
+  assert.equal(db.getUserForAuthByUsername('alice').auth_version, 1);
+
+  // 5. 会員投稿作成・一覧と単体取得の両方で is_member 一致・updatePost会員名変更禁止
+  const memberPost = db.createPost({
+    threadId: 1,
+    authorName: 'alice',
+    visitorId: 'mem_vis_01',
+    content: '会員の投稿です',
+    createdBy: createdUser.id,
+  });
+  assert.equal(memberPost.is_member, true);
+  const threadMemberPost = db.getThreadDetail(1).posts.find((p) => p.id === memberPost.id);
+  assert.equal(threadMemberPost.is_member, true);
+
+  // 本文のみ編集は通るが、会員投稿の名前変更は拒否されること
+  const editedContent = db.updatePost({ postId: memberPost.id, content: '会員投稿の本文修正' });
+  assert.equal(editedContent.post.content, '会員投稿の本文修正');
+  assert.throws(
+    () => db.updatePost({ postId: memberPost.id, content: '偽装', authorName: 'bob' }),
+    /変更できません/
+  );
+
+  // 6. resetPassword / setUserRole / clearAllSessions（バックアップ復元時想定）
+  const resetRes = db.resetPasswordByUsername({ username: 'alice', newPasswordHash: 'hash-temp' });
+  assert.equal(resetRes.found, true);
+  assert.equal(resetRes.user.mustChangePassword, true);
+  const roleRes = db.setUserRoleByUsername({ username: 'alice', role: 'admin' });
+  assert.equal(roleRes.user.role, 'admin');
+
+  // セッションを再作成してから clearAllSessions で全消去できること
+  const authAlice = db.getUserForAuthByUsername('alice');
+  db.issueSessionIfVersionMatches({
+    userId: authAlice.id,
+    expectedAuthVersion: authAlice.auth_version,
+    tokenHash: 'd'.repeat(64),
+    expiresAt: expIso,
+    nowIso,
+  });
+  assert.ok(db.getSessionAuthByTokenHash('d'.repeat(64), nowIso) !== null);
+  assert.equal(db.clearAllSessions() >= 1, true);
+  assert.equal(db.getSessionAuthByTokenHash('d'.repeat(64), nowIso), null);
+});

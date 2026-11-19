@@ -49,6 +49,10 @@ function startServer() {
   }
 
   const trustProxy = String(process.env.TRUST_PROXY || 'false').toLowerCase() === 'true';
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || null;
+  const allowSignup = String(process.env.ALLOW_SIGNUP || 'true').toLowerCase() !== 'false';
+  const devInsecureCookie =
+    String(process.env.DEV_INSECURE_COOKIE || 'false').toLowerCase() === 'true';
   const dbPath = resolveProjectDbPath(process.env.DB_PATH || './data/board.db');
   const publicDir = resolvePublicDir(process.env.PUBLIC_DIR);
 
@@ -62,6 +66,9 @@ function startServer() {
     idSecret,
     adminToken: process.env.ADMIN_TOKEN || null,
     trustProxy,
+    allowedOrigin,
+    allowSignup,
+    devInsecureCookie,
     publicDir,
   });
 
@@ -69,14 +76,17 @@ function startServer() {
   server.listen(port, host, () => {
     const addr = server.address();
     console.log('==========================================================');
-    console.log('[STARTUP] basic_board v0.5 が起動しました');
+    console.log('[STARTUP] basic_board v1.0-dev が起動しました');
     console.log(`[STARTUP] 待受アドレス : http://${addr.address}:${addr.port}`);
     console.log(`[STARTUP] 公開フォルダ : ${publicDir}`);
     console.log(`[STARTUP] DBファイル   : ${dbStatus.dbPath}`);
     console.log(
-      `[STARTUP] SQLite設定   : foreign_keys=${dbStatus.foreignKeys}, journal_mode=${dbStatus.journalMode}`
+      `[STARTUP] SQLite設定   : foreign_keys=${dbStatus.foreignKeys}, journal_mode=${dbStatus.journalMode}, schemaVersion=${dbStatus.schemaVersion}`
     );
     console.log(`[STARTUP] プロキシ信頼 : trustProxy=${trustProxy}`);
+    console.log(
+      `[STARTUP] 認証構成     : allowSignup=${allowSignup}, cookieMode=${devInsecureCookie ? 'DEV HTTP' : 'HTTPS __Host-'}, allowedOrigin=${allowedOrigin ? allowedOrigin.trim() : '(Host自動)'}`
+    );
     console.log('==========================================================');
   });
 

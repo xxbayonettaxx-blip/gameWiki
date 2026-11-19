@@ -37,6 +37,13 @@
     composerTriggerEl: null,
     composerTriggerSelector: null,
     settingsOpen: false,
+    authOpen: false,
+    authTab: 'login',
+    isAuthSubmitting: false,
+    user: null,                 // { id, username, role, mustChangePassword } | null
+    anonAuthorDraft: '',
+    pendingSessionExpired: false,
+    reopenComposerAfterAuth: false,
     isSubmitting: false,
     loadSeq: 0,
     abortCtrl: null,
@@ -185,6 +192,9 @@
   // 3. 上からスライド展開する「表示設定シート」の開閉（F4: inert・即時focus対応）
   // -------------------------------------------------------------------
   function openSettings() {
+    if (state.authOpen) {
+      closeAuthSheet({ restoreFocus: false });
+    }
     if (state.composerOpen && window.innerWidth < 760) {
       closeComposer({ restoreFocus: false });
     }
@@ -224,6 +234,199 @@
   }
 
   // -------------------------------------------------------------------
+  // 3b. アカウント認証シート（ログイン / 新規登録 / パスワード変更 / ログアウト）
+  // -------------------------------------------------------------------
+  function countCodePoints(str) {
+    return Array.from(String(str || '')).length;
+  }
+
+  function clearAuthPasswords() {
+    for (const sel of [
+      '#login-password',
+      '#register-password',
+      '#register-password-confirm',
+      '#current-password',
+      '#new-password',
+      '#new-password-confirm',
+    ]) {
+      const input = $(sel);
+      if (input) input.value = '';
+    }
+  }
+
+  function clearAuthErrors() {
+    for (const sel of ['#login-error', '#register-error', '#password-error', '#logout-error']) {
+      const node = $(sel);
+      if (node) node.textContent = '';
+    }
+  }
+
+  function syncAuthUI() {
+    const trigger = $('#auth-open');
+    const triggerLabel = $('#auth-open-label');
+    if (trigger && triggerLabel) {
+      trigger.classList.toggle('is-logged-in', Boolean(state.user));
+      if (state.user) {
+        triggerLabel.textContent = state.user.mustChangePassword
+          ? `${state.user.username}(要変更)`
+          : state.user.username;
+        trigger.setAttribute('aria-label', `アカウントメニュー (${state.user.username})`);
+      } else {
+        triggerLabel.textContent = 'ログイン';
+        trigger.setAttribute('aria-label', 'アカウント・ログインを開く');
+      }
+    }
+
+    const guestPanel = $('#auth-guest-panel');
+    const memberPanel = $('#auth-member-panel');
+    const titleEl = $('#auth-sheet-title');
+
+    if (state.user) {
+      if (guestPanel) guestPanel.hidden = true;
+      if (memberPanel) memberPanel.hidden = false;
+      if (titleEl) {
+        titleEl.textContent = state.user.mustChangePassword
+          ? 'パスワード変更のお願い'
+          : 'アカウント管理';
+      }
+      $('#auth-member-name').textContent = state.user.username;
+      $('#auth-member-role').textContent = state.user.role === 'admin' ? '管理者' : '一般会員';
+      $('#must-change-banner').hidden = !state.user.mustChangePassword;
+    } else {
+      if (guestPanel) guestPanel.hidden = false;
+      if (memberPanel) memberPanel.hidden = true;
+      if (titleEl) titleEl.textContent = 'ログイン・新規登録';
+
+      const isLogin = state.authTab !== 'register';
+      $('#auth-tab-login').setAttribute('aria-selected', String(isLogin));
+      $('#auth-tab-register').setAttribute('aria-selected', String(!isLogin));
+      $('#login-form').hidden = !isLogin;
+      $('#register-form').hidden = isLogin;
+    }
+
+    const authorInput = $('#author-name');
+    const authNote = $('#composer-auth-note');
+    const mustChangeBox = $('#composer-must-change-box');
+    const expiredBox = $('#session-expired-box');
+
+    if (authorInput) {
+      if (state.user) {
+        if (!authorInput.readOnly) {
+          state.anonAuthorDraft = authorInput.value;
+        }
+        authorInput.value = state.user.username;
+        authorInput.readOnly = true;
+        if (authNote) {
+          authNote.hidden = false;
+          authNote.textContent = `会員アカウント「${state.user.username}」として投稿されます（投稿者名は固定）。`;
+        }
+        if (mustChangeBox) mustChangeBox.hidden = !state.user.mustChangePassword;
+        state.pendingSessionExpired = false;
+        if (expiredBox) expiredBox.hidden = true;
+      } else {
+        if (authorInput.readOnly) {
+          authorInput.value = state.anonAuthorDraft || '';
+        }
+        authorInput.readOnly = false;
+        if (authNote) {
+          authNote.hidden = true;
+          authNote.textContent = '';
+        }
+        if (mustChangeBox) mustChangeBox.hidden = true;
+        if (expiredBox) expiredBox.hidden = !state.pendingSessionExpired;
+      }
+    }
+
+    syncSubmitAvailability();
+  }
+
+  function focusFirstAuthField() {
+    if (state.user) {
+      $('#current-password')?.focus({ preventScroll: true });
+    } else if (state.authTab === 'register') {
+      $('#register-username')?.focus({ preventScroll: true });
+    } else {
+      $('#login-username')?.focus({ preventScroll: true });
+    }
+  }
+
+  function openAuthSheet({ tab = null, reopenComposer = false } = {}) {
+    if (state.settingsOpen) {
+      closeSettings({ restoreFocus: false });
+    }
+    if (state.composerOpen && window.innerWidth < 760) {
+      closeComposer({ restoreFocus: false });
+    }
+    state.reopenComposerAfterAuth = Boolean(reopenComposer);
+    if (tab === 'login' || tab === 'register') {
+      state.authTab = tab;
+    }
+    state.authOpen = true;
+    clearAuthErrors();
+    syncAuthUI();
+
+    const sheet = $('#auth-sheet');
+    const backdrop = $('#auth-backdrop');
+    const trigger = $('#auth-open');
+    backdrop.hidden = false;
+    sheet.inert = false;
+    sheet.setAttribute('aria-hidden', 'false');
+    sheet.classList.add('is-open');
+    trigger.setAttribute('aria-expanded', 'true');
+    void sheet.offsetWidth;
+    focusFirstAuthField();
+  }
+
+  function closeAuthSheet({ restoreFocus = true } = {}) {
+    clearAuthPasswords();
+    clearAuthErrors();
+    if (!state.authOpen) return;
+    state.authOpen = false;
+    state.reopenComposerAfterAuth = false;
+
+    const sheet = $('#auth-sheet');
+    const backdrop = $('#auth-backdrop');
+    const trigger = $('#auth-open');
+    sheet.classList.remove('is-open');
+    sheet.setAttribute('aria-hidden', 'true');
+    sheet.inert = true;
+    backdrop.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus) trigger.focus({ preventScroll: true });
+  }
+
+  function toggleAuthSheet() {
+    if (state.authOpen) closeAuthSheet();
+    else openAuthSheet();
+  }
+
+  async function probeCurrentUser() {
+    try {
+      const res = await fetch('api/auth/me', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
+      if (!res.ok) return { ok: false, user: null };
+      const data = await res.json().catch(() => null);
+      if (!data || typeof data !== 'object' || !('user' in data)) {
+        return { ok: false, user: null };
+      }
+      return { ok: true, user: data.user || null };
+    } catch {
+      return { ok: false, user: null };
+    }
+  }
+
+  async function fetchCurrentUser() {
+    const probed = await probeCurrentUser();
+    if (!probed.ok) return null;
+    state.user = probed.user;
+    syncAuthUI();
+    return state.user;
+  }
+
+  // -------------------------------------------------------------------
   // 4. スライド式投稿ドロワーの開閉 ＆ 送信可否・返信ハイライト制御
   // -------------------------------------------------------------------
   function canSubmitPost() {
@@ -231,6 +434,7 @@
       state.activeThreadId !== null &&
       state.loadingThreadId === null &&
       state.failedTargetThread === null &&
+      !state.user?.mustChangePassword &&
       !state.isSubmitting
     );
   }
@@ -337,6 +541,9 @@
 
     if (state.settingsOpen) {
       closeSettings({ restoreFocus: false });
+    }
+    if (state.authOpen) {
+      closeAuthSheet({ restoreFocus: false });
     }
 
     rememberTrigger(triggerEl);
@@ -541,11 +748,11 @@
       if (node.is_pinned === 1) {
         meta.append(el('span', 'pinned-badge', '📌 ピン留め'));
       }
-      meta.append(
-        postNumEl,
-        el('span', 'comment-author', node.author_name),
-        el('span', 'comment-id', `ID: ${node.visitor_id}`)
-      );
+      meta.append(postNumEl, el('span', 'comment-author', node.author_name));
+      if (node.is_member) {
+        meta.append(el('span', 'member-badge', '会員'));
+      }
+      meta.append(el('span', 'comment-id', `ID: ${node.visitor_id}`));
     }
 
     const timeEl = el('time', 'comment-time', formatTime(node.created_at));
@@ -876,7 +1083,9 @@
   async function handleSubmit(event) {
     event.preventDefault();
     if (!canSubmitPost()) {
-      if (state.loadingThreadId !== null) {
+      if (state.user?.mustChangePassword) {
+        openAuthSheet();
+      } else if (state.loadingThreadId !== null) {
         $('#form-error').textContent = 'スレッドを読み込み中です。完了してから送信してください。';
       } else if (state.failedTargetThread !== null) {
         $('#form-error').textContent =
@@ -905,6 +1114,7 @@
     try {
       const res = await fetch('api/posts', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
@@ -917,9 +1127,25 @@
         }),
       });
       const data = await res.json().catch(() => ({}));
+      if (res.status === 401 && data.code === 'SESSION_EXPIRED') {
+        state.user = null;
+        state.pendingSessionExpired = true;
+        syncAuthUI();
+        $('#form-error').textContent = data.error || 'ログインの有効期限が切れています。';
+        $('#expired-relogin-btn')?.focus({ preventScroll: true });
+        return;
+      }
+      if (res.status === 403 && data.code === 'PASSWORD_CHANGE_REQUIRED') {
+        await fetchCurrentUser();
+        $('#form-error').textContent = data.error || '仮パスワードのままでは投稿できません。';
+        return;
+      }
       if (!res.ok) {
         throw new Error(data.error || `投稿に失敗しました (HTTP ${res.status})`);
       }
+
+      state.pendingSessionExpired = false;
+      syncAuthUI();
 
       // 成功した送信先の下書きだけを消し、別スレッドや別の返信先での編集を保持する。
       const submittedDraft = state.drafts.get(submitThreadId);
@@ -1090,6 +1316,255 @@
 
     $('#comment-form').addEventListener('submit', handleSubmit);
 
+    // 仮パスワード制限 / セッション期限切れ時の案内アクション
+    $('#composer-open-password-btn').addEventListener('click', () => openAuthSheet());
+    $('#expired-relogin-btn').addEventListener('click', () => {
+      openAuthSheet({ tab: 'login', reopenComposer: true });
+    });
+    $('#expired-anon-btn').addEventListener('click', () => {
+      state.user = null;
+      state.pendingSessionExpired = false;
+      syncAuthUI();
+      $('#comment-form').requestSubmit();
+    });
+
+    // アカウント認証シート（開閉・タブ切替・登録・ログイン・パスワード変更・ログアウト）
+    $('#auth-open').addEventListener('click', toggleAuthSheet);
+    $('#auth-close').addEventListener('click', () => closeAuthSheet());
+    $('#auth-backdrop').addEventListener('click', () => closeAuthSheet());
+
+    $('#auth-tab-login').addEventListener('click', () => {
+      state.authTab = 'login';
+      clearAuthPasswords();
+      clearAuthErrors();
+      syncAuthUI();
+      $('#login-username').focus({ preventScroll: true });
+    });
+    $('#auth-tab-register').addEventListener('click', () => {
+      state.authTab = 'register';
+      clearAuthPasswords();
+      clearAuthErrors();
+      syncAuthUI();
+      $('#register-username').focus({ preventScroll: true });
+    });
+
+    $('#login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (state.isAuthSubmitting) return;
+      clearAuthErrors();
+      const username = $('#login-username').value;
+      const password = $('#login-password').value;
+
+      state.isAuthSubmitting = true;
+      $('#login-submit').disabled = true;
+      try {
+        const res = await fetch('api/auth/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          $('#login-error').textContent = data.error || `ログインに失敗しました (HTTP ${res.status})`;
+          return;
+        }
+        clearAuthPasswords();
+        state.user = data.user || null;
+        state.pendingSessionExpired = false;
+        const shouldReopen = state.reopenComposerAfterAuth && !state.user?.mustChangePassword;
+        syncAuthUI();
+
+        if (state.user?.mustChangePassword) {
+          notify('仮パスワードでログインしました。新しいパスワードへ変更してください。');
+          $('#current-password').focus({ preventScroll: true });
+        } else if (shouldReopen) {
+          closeAuthSheet({ restoreFocus: false });
+          openComposer(null, $('#write-comment'));
+          notify(`${state.user.username} として再ログインしました。投稿を続けられます。`);
+        } else {
+          closeAuthSheet();
+          notify(`${state.user.username} としてログインしました。`);
+        }
+      } catch {
+        $('#login-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
+      } finally {
+        state.isAuthSubmitting = false;
+        $('#login-submit').disabled = false;
+      }
+    });
+
+    $('#register-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (state.isAuthSubmitting) return;
+      clearAuthErrors();
+      const username = $('#register-username').value;
+      const password = $('#register-password').value;
+      const passwordConfirm = $('#register-password-confirm').value;
+
+      const trimmedNameLen = countCodePoints(
+        username.replace(/^[\s\u3000\u200B-\u200D\u2060\uFEFF]+|[\s\u3000\u200B-\u200D\u2060\uFEFF]+$/g, '')
+      );
+      if (trimmedNameLen < 3 || trimmedNameLen > 30) {
+        $('#register-error').textContent = 'ユーザー名は3〜30文字で入力してください。';
+        $('#register-username').focus();
+        return;
+      }
+      const passwordLen = countCodePoints(password);
+      if (passwordLen < 8 || passwordLen > 128) {
+        $('#register-error').textContent = 'パスワードは8〜128文字で入力してください。';
+        $('#register-password').focus();
+        return;
+      }
+      if (password !== passwordConfirm) {
+        $('#register-error').textContent = 'パスワードと確認用パスワードが一致しません。';
+        $('#register-password-confirm').focus();
+        return;
+      }
+
+      state.isAuthSubmitting = true;
+      $('#register-submit').disabled = true;
+      try {
+        const res = await fetch('api/auth/register', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          $('#register-error').textContent = data.error || `登録に失敗しました (HTTP ${res.status})`;
+          return;
+        }
+        clearAuthPasswords();
+        state.user = data.user || null;
+        state.pendingSessionExpired = false;
+        syncAuthUI();
+        closeAuthSheet();
+        notify(`アカウント「${state.user.username}」を作成しログインしました。`);
+      } catch {
+        $('#register-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
+      } finally {
+        state.isAuthSubmitting = false;
+        $('#register-submit').disabled = false;
+      }
+    });
+
+    $('#password-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (state.isAuthSubmitting) return;
+      clearAuthErrors();
+      const currentPassword = $('#current-password').value;
+      const newPassword = $('#new-password').value;
+      const newPasswordConfirm = $('#new-password-confirm').value;
+
+      const newPasswordLen = countCodePoints(newPassword);
+      if (newPasswordLen < 8 || newPasswordLen > 128) {
+        $('#password-error').textContent = '新しいパスワードは8〜128文字で入力してください。';
+        $('#new-password').focus();
+        return;
+      }
+      if (newPassword !== newPasswordConfirm) {
+        $('#password-error').textContent = '新しいパスワードと確認用パスワードが一致しません。';
+        $('#new-password-confirm').focus();
+        return;
+      }
+
+      state.isAuthSubmitting = true;
+      $('#password-submit').disabled = true;
+      try {
+        const res = await fetch('api/auth/password', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: JSON.stringify({ currentPassword, newPassword }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (res.status === 401 && !String(data.error || '').includes('現在のパスワード')) {
+            await fetchCurrentUser();
+          }
+          $('#password-error').textContent = data.error || `変更に失敗しました (HTTP ${res.status})`;
+          return;
+        }
+        clearAuthPasswords();
+        state.user = null;
+        state.authTab = 'login';
+        syncAuthUI();
+        $('#login-username').focus({ preventScroll: true });
+        notify('パスワードを変更しました。新しいパスワードで再ログインしてください。');
+      } catch {
+        $('#password-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
+      } finally {
+        state.isAuthSubmitting = false;
+        $('#password-submit').disabled = false;
+      }
+    });
+
+    $('#logout-button').addEventListener('click', async () => {
+      if (state.isAuthSubmitting) return;
+      clearAuthPasswords();
+      clearAuthErrors();
+      state.isAuthSubmitting = true;
+      $('#logout-button').disabled = true;
+
+      let serverErr = '';
+      let logoutSucceeded = false;
+      try {
+        const res = await fetch('api/auth/logout', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: '{}',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+          logoutSucceeded = true;
+        } else {
+          serverErr = data?.error || '';
+        }
+      } catch {
+        // 応答喪失または通信切断時は下の再照会でサーバー上の実状態を確認する
+      }
+
+      try {
+        if (logoutSucceeded) {
+          state.user = null;
+          state.pendingSessionExpired = false;
+          syncAuthUI();
+          closeAuthSheet();
+          notify('ログアウトしました。');
+          return;
+        }
+
+        const probed = await probeCurrentUser();
+        if (probed.ok && probed.user === null) {
+          state.user = null;
+          state.pendingSessionExpired = false;
+          syncAuthUI();
+          closeAuthSheet();
+          notify('ログアウトを確認しました。');
+          return;
+        }
+
+        if (probed.ok && probed.user !== null) {
+          state.user = probed.user;
+          syncAuthUI();
+          $('#logout-error').textContent =
+            serverErr || 'ログアウトを完了できませんでした。時間をおいて再度お試しください。';
+          notify('ログアウトに失敗しました。ログイン状態が残っています。');
+          return;
+        }
+
+        $('#logout-error').textContent =
+          '通信エラーによりログアウトを完了できませんでした。通信回復後に再度お試しください。';
+        notify('ログアウトを完了できませんでした。再試行してください。');
+      } finally {
+        state.isAuthSubmitting = false;
+        $('#logout-button').disabled = false;
+      }
+    });
+
     // 上スライド表示設定シートの開閉 ＆ 設定変更
     $('#settings-open').addEventListener('click', toggleSettings);
     $('#settings-close').addEventListener('click', () => closeSettings());
@@ -1136,7 +1611,10 @@
       if ($('#guide-dialog').open) return;
 
       if (e.key === 'Escape') {
-        if (state.settingsOpen) {
+        if (state.authOpen) {
+          e.preventDefault();
+          closeAuthSheet();
+        } else if (state.settingsOpen) {
           e.preventDefault();
           closeSettings();
         } else if (state.composerOpen) {
@@ -1147,11 +1625,13 @@
       }
 
       if (e.key === 'Tab') {
-        const activePanel = state.settingsOpen
-          ? $('#settings-sheet')
-          : state.composerOpen
-            ? $('#composer-drawer')
-            : null;
+        const activePanel = state.authOpen
+          ? $('#auth-sheet')
+          : state.settingsOpen
+            ? $('#settings-sheet')
+            : state.composerOpen
+              ? $('#composer-drawer')
+              : null;
         if (!activePanel) return;
 
         const focusables = [
@@ -1179,5 +1659,6 @@
 
   loadPreferences();
   initEvents();
+  fetchCurrentUser();
   loadInitialData();
 })();

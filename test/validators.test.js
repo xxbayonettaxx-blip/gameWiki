@@ -12,8 +12,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   ValidationError,
+  countCodePoints,
   parsePositiveInt,
   validatePostInput,
+  validateUsername,
+  validatePassword,
+  validateUserRole,
+  validateAuthRegisterInput,
+  validateAuthLoginInput,
+  validateChangePasswordInput,
   validateIdSecret,
   getJstDateString,
   generateVisitorId,
@@ -103,6 +110,23 @@ test('validatePostInput: 文字数上限（名前30文字・本文2000文字）�
     ValidationError
   );
 
+  // 非BMP Unicode（絵文字など）もUTF-16単位ではなくコードポイント数（30文字まで許可）で検査する
+  const emoji16 = '😀'.repeat(16); // UTF-16 length=32, codePoints=16
+  assert.equal(validatePostInput({ thread_id: 1, author_name: emoji16, content: 'ok' }).authorName, emoji16);
+  const emoji30 = '😀'.repeat(30);
+  assert.equal(validatePostInput({ thread_id: 1, author_name: emoji30, content: 'ok' }).authorName, emoji30);
+  assert.throws(
+    () => validatePostInput({ thread_id: 1, author_name: '😀'.repeat(31), content: 'ok' }),
+    ValidationError
+  );
+
+  // 会員投稿モード（ignoreAuthorName=true）ではクライアントの author_name を検証対象外として無視する
+  const memberValidated = validatePostInput(
+    { thread_id: 1, author_name: 'x'.repeat(100), content: 'member body' },
+    { ignoreAuthorName: true }
+  );
+  assert.equal(memberValidated.content, 'member body');
+
   // NULL文字混入は拒否
   assert.throws(
     () => validatePostInput({ thread_id: 1, content: '不正\x00文字' }),
@@ -147,4 +171,43 @@ test('validateIdSecret & extractClientIp: 見本秘密鍵の拒否と転送ヘ�
     headers: { 'x-real-ip': '203.0.113.99' },
   };
   assert.equal(extractClientIp(proxyReq, { trustProxy: true }), '203.0.113.99');
+});
+
+test('validateUsername & validatePassword: 境界値・Unicode単位・トリム有無・禁止文字を正確に検査する', () => {
+  // サロゲートペア（絵文字）もJS UTF-16(.length=2)ではなくSQLiteと同じ1文字として数える
+  assert.equal(countCodePoints('😀aい'), 3);
+  assert.equal(validateUsername('  😀aい  '), '😀aい');
+  assert.equal(validateUsername('あ'.repeat(30)), 'あ'.repeat(30));
+
+  for (const badName of ['ab', '  ab  ', 'あ'.repeat(31), '   \u3000  ', 'alice\nbob', 'bob\u200B']) {
+    assert.throws(() => validateUsername(badName), ValidationError);
+  }
+
+  // パスワードは前後空白を勝手にトリムしない
+  const paddedPass = '  my secret pass  ';
+  assert.equal(validatePassword(paddedPass), paddedPass);
+  assert.equal(validatePassword('p'.repeat(8)), 'p'.repeat(8));
+  assert.equal(validatePassword('あ'.repeat(128)), 'あ'.repeat(128));
+
+  for (const badPass of ['1234567', '        ', '\u3000'.repeat(10), 'bad\x00pass', 'bad\npass', 'x'.repeat(129)]) {
+    assert.throws(() => validatePassword(badPass), ValidationError);
+  }
+
+  assert.equal(validateUserRole('user'), 'user');
+  assert.equal(validateUserRole('admin'), 'admin');
+  assert.throws(() => validateUserRole('superadmin'), ValidationError);
+
+  // 登録時の余計なフィールド(role等)は無視されること
+  const reg = validateAuthRegisterInput({ username: 'alice', password: 'password123', role: 'admin' });
+  assert.deepEqual(reg, { username: 'alice', password: 'password123' });
+
+  // ログイン時は将来の最低文字数変更との互換のため minLength=1 で受けるが制御文字や長大入力は拒否
+  assert.deepEqual(validateAuthLoginInput({ username: 'alice', password: 'x' }), {
+    username: 'alice',
+    password: 'x',
+  });
+  assert.throws(() => validateAuthLoginInput({ username: 'alice', password: '' }), ValidationError);
+
+  const chg = validateChangePasswordInput({ currentPassword: 'old', newPassword: 'newpassword123' });
+  assert.deepEqual(chg, { currentPassword: 'old', newPassword: 'newpassword123' });
 });

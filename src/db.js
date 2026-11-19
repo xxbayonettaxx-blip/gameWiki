@@ -15,7 +15,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { ValidationError, parsePositiveInt, validatePostInput } = require('./validators');
+const { ValidationError, parsePositiveInt, validatePostInput, validateUsername, validateUserRole } = require('./validators');
 
 // プロジェクトルートおよびスキーマ正本のパス（カレントディレクトリに依存しない __dirname 基準）
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -85,9 +85,27 @@ function createBoardDb(options = {}) {
       );
     }
 
-    // スキーマ正本（PRAGMA foreign_keys = ON, WAL, 4テーブル, インデックス）を読み込んで適用
+    const userColumns = sqlite.prepare('PRAGMA table_info(users);').all();
+    if (userColumns.length > 0 && !userColumns.some((col) => col.name === 'auth_version')) {
+      sqlite.exec('ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0;');
+    }
+    if (userColumns.length > 0 && !userColumns.some((col) => col.name === 'must_change_password')) {
+      sqlite.exec(
+        'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1));'
+      );
+    }
+
+    // スキーマ正本（PRAGMA foreign_keys = ON, WAL, 5テーブル, インデックス）を読み込んで適用
     const schemaSql = fs.readFileSync(schemaPath, 'utf8');
     sqlite.exec(schemaSql);
+
+    // 極初期スキーマ(created_by欠落DB)からの非破壊移行（usersテーブル作成後に外部キー付きで追加）
+    if (postColumns.length > 0 && !postColumns.some((col) => col.name === 'created_by')) {
+      sqlite.exec('ALTER TABLE posts ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;');
+    }
+    if (threadColumns.length > 0 && !threadColumns.some((col) => col.name === 'created_by')) {
+      sqlite.exec('ALTER TABLE threads ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;');
+    }
 
     // 接続ごとに必須の外部キー制約を再度明示ONにし、実際に有効化されたか戻り値を検証する
     sqlite.exec('PRAGMA foreign_keys = ON;');
@@ -100,6 +118,14 @@ function createBoardDb(options = {}) {
     // 実際の journal_mode を取得（ファイルDBなら 'wal'、:memory: なら 'memory' になる）
     const jmRow = sqlite.prepare('PRAGMA journal_mode;').get();
     const journalMode = jmRow ? String(jmRow.journal_mode).toLowerCase() : 'unknown';
+
+    // スキーマ適用版を記録する（将来マイグレーション用の観測指標）
+    const uvRow = sqlite.prepare('PRAGMA user_version;').get();
+    let schemaVersion = uvRow ? Number(uvRow.user_version) : 0;
+    if (schemaVersion < 2) {
+      sqlite.exec('PRAGMA user_version = 2;');
+      schemaVersion = 2;
+    }
 
     // -----------------------------------------------------------------
     // 3. プリペアドステートメントの定義（パラメータ束縛によりSQLインジェクションを防止）
@@ -133,7 +159,7 @@ function createBoardDb(options = {}) {
         WHERE id = ?
       `),
 
-      // ★重要：論理削除（is_deleted = 1）の行はSQL段階で本文・名前・日替わりIDをマスクし、
+      // ★重要：論理削除（is_deleted = 1）の行はSQL段階で本文・名前・日替わりID・会員判定をマスクし、
       // 削除前の生データがAPIレスポンスやメモリ上の公開配列に乗らないようにする。
       listPublicPostsByThread: sqlite.prepare(`
         SELECT
@@ -144,6 +170,7 @@ function createBoardDb(options = {}) {
           CASE WHEN is_deleted = 1 THEN '----------' ELSE visitor_id END AS visitor_id,
           CASE WHEN is_deleted = 1 THEN 'この投稿は削除されました。' ELSE content END AS content,
           CASE WHEN is_deleted = 1 THEN 0 ELSE is_pinned END AS is_pinned,
+          CASE WHEN is_deleted = 1 THEN 0 WHEN created_by IS NOT NULL THEN 1 ELSE 0 END AS is_member,
           is_deleted,
           created_at
         FROM posts
@@ -161,6 +188,7 @@ function createBoardDb(options = {}) {
           CASE WHEN is_deleted = 1 THEN '----------' ELSE visitor_id END AS visitor_id,
           CASE WHEN is_deleted = 1 THEN 'この投稿は削除されました。' ELSE content END AS content,
           CASE WHEN is_deleted = 1 THEN 0 ELSE is_pinned END AS is_pinned,
+          CASE WHEN is_deleted = 1 THEN 0 WHEN created_by IS NOT NULL THEN 1 ELSE 0 END AS is_member,
           is_deleted,
           created_at
         FROM posts
@@ -180,8 +208,8 @@ function createBoardDb(options = {}) {
       `),
 
       insertPost: sqlite.prepare(`
-        INSERT INTO posts (thread_id, parent_id, author_name, visitor_id, content)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO posts (thread_id, parent_id, author_name, visitor_id, content, created_by)
+        VALUES (?, ?, ?, ?, ?, ?)
       `),
 
       insertPostWithPin: sqlite.prepare(`
@@ -246,7 +274,7 @@ function createBoardDb(options = {}) {
       // 物理削除（purge-tree / purge-thread）用のステートメント
       getPostWithThreadAndCategory: sqlite.prepare(`
         SELECT
-          p.id, p.thread_id, p.parent_id, p.author_name, p.visitor_id, p.content, p.is_pinned, p.is_deleted, p.created_at,
+          p.id, p.thread_id, p.parent_id, p.author_name, p.visitor_id, p.content, p.is_pinned, p.is_deleted, p.created_by, p.created_at,
           t.title AS thread_title, t.category_id,
           c.name AS category_name
         FROM posts p
@@ -298,10 +326,158 @@ function createBoardDb(options = {}) {
       deleteThreadById: sqlite.prepare(`
         DELETE FROM threads WHERE id = ?
       `),
+
+      // ユーザー・セッション認証用ステートメント（password_hash と token_hash の扱いを閉じる）
+      insertUser: sqlite.prepare(`
+        INSERT INTO users (username, password_hash, role, auth_version, must_change_password)
+        VALUES (?, ?, ?, 0, ?)
+      `),
+
+      getUserByUsername: sqlite.prepare(`
+        SELECT id, username, password_hash, role, auth_version, must_change_password, created_at
+        FROM users
+        WHERE username = ?
+      `),
+
+      getUserById: sqlite.prepare(`
+        SELECT id, username, password_hash, role, auth_version, must_change_password, created_at
+        FROM users
+        WHERE id = ?
+      `),
+
+      listUsersSummary: sqlite.prepare(`
+        SELECT
+          u.id,
+          u.username,
+          u.role,
+          u.auth_version,
+          u.must_change_password,
+          u.created_at,
+          COUNT(CASE WHEN s.expires_at > ? THEN 1 END) AS active_sessions
+        FROM users u
+        LEFT JOIN sessions s ON s.user_id = u.id
+        GROUP BY u.id
+        ORDER BY u.id ASC
+      `),
+
+      insertSession: sqlite.prepare(`
+        INSERT INTO sessions (user_id, token_hash, expires_at, created_at)
+        VALUES (?, ?, ?, ?)
+      `),
+
+      getSessionAndUserByTokenHash: sqlite.prepare(`
+        SELECT
+          s.id AS session_id,
+          s.token_hash,
+          s.expires_at,
+          s.created_at AS session_created_at,
+          u.id AS user_id,
+          u.username,
+          u.password_hash,
+          u.role,
+          u.auth_version,
+          u.must_change_password
+        FROM sessions s
+        JOIN users u ON u.id = s.user_id
+        WHERE s.token_hash = ?
+      `),
+
+      listUserSessionIdsAsc: sqlite.prepare(`
+        SELECT id
+        FROM sessions
+        WHERE user_id = ?
+        ORDER BY created_at ASC, id ASC
+      `),
+
+      deleteSessionById: sqlite.prepare(`
+        DELETE FROM sessions WHERE id = ?
+      `),
+
+      deleteSessionByTokenHash: sqlite.prepare(`
+        DELETE FROM sessions WHERE token_hash = ?
+      `),
+
+      deleteExpiredSessionsForUser: sqlite.prepare(`
+        DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?
+      `),
+
+      deleteAllSessionsForUser: sqlite.prepare(`
+        DELETE FROM sessions WHERE user_id = ?
+      `),
+
+      deleteAllSessions: sqlite.prepare(`
+        DELETE FROM sessions
+      `),
+
+      deleteExpiredSessionsBatch: sqlite.prepare(`
+        DELETE FROM sessions
+        WHERE id IN (
+          SELECT id FROM sessions WHERE expires_at <= ? ORDER BY expires_at ASC LIMIT ?
+        )
+      `),
+
+      updatePasswordAndBumpVersion: sqlite.prepare(`
+        UPDATE users
+        SET password_hash = ?, must_change_password = ?, auth_version = auth_version + 1
+        WHERE id = ?
+      `),
+
+      updateRoleAndBumpVersion: sqlite.prepare(`
+        UPDATE users
+        SET role = ?, auth_version = auth_version + 1
+        WHERE id = ?
+      `),
+
+      bumpUserAuthVersion: sqlite.prepare(`
+        UPDATE users
+        SET auth_version = auth_version + 1
+        WHERE id = ?
+      `),
     };
 
     // node:sqlite が返す null prototype オブジェクトを通常のプレーンオブジェクトへ変換する補助関数
     const toPlain = (row) => (row ? { ...row } : null);
+    const toPublicPost = (row) => {
+      if (!row) return null;
+      return {
+        ...row,
+        is_member: Boolean(row.is_member),
+      };
+    };
+    const toPublicUser = (row) => {
+      if (!row) return null;
+      return {
+        id: Number(row.id),
+        username: row.username,
+        role: row.role,
+        mustChangePassword: Boolean(row.must_change_password),
+      };
+    };
+
+    function isUniqueConstraintError(err) {
+      const text = `${err?.message || ''} ${err?.errstr || ''}`;
+      return /UNIQUE constraint failed/i.test(text);
+    }
+
+    function pruneAndInsertSession({
+      userId,
+      tokenHash,
+      expiresAt,
+      nowIso,
+      maxSessions = 5,
+      replaceTokenHash = null,
+    }) {
+      if (replaceTokenHash) {
+        stmts.deleteSessionByTokenHash.run(replaceTokenHash);
+      }
+      stmts.deleteExpiredSessionsForUser.run(userId, nowIso);
+      const activeIds = stmts.listUserSessionIdsAsc.all(userId);
+      const overflow = activeIds.length - (maxSessions - 1);
+      for (let i = 0; i < overflow; i += 1) {
+        stmts.deleteSessionById.run(activeIds[i].id);
+      }
+      stmts.insertSession.run(userId, tokenHash, expiresAt, nowIso);
+    }
 
     // トランザクション実行ヘルパー（途中で例外が発生したら確実に ROLLBACK してDBを汚さない）
     function runInTransaction(workFn) {
@@ -330,6 +506,7 @@ function createBoardDb(options = {}) {
           dbPath: targetPath,
           foreignKeys,
           journalMode,
+          schemaVersion,
           maxPostsPerThread,
           maxReplyDepth,
         };
@@ -361,7 +538,7 @@ function createBoardDb(options = {}) {
         }
         const posts = stmts.listPublicPostsByThread
           .all(threadId, maxPostsPerThread)
-          .map(toPlain);
+          .map(toPublicPost);
 
         return {
           thread,
@@ -374,7 +551,7 @@ function createBoardDb(options = {}) {
       },
 
       // 新規投稿または返信の登録（トランザクション内で整合性・件数上限・階層上限を検査）
-      createPost({ threadId, parentId = null, authorName, visitorId, content }) {
+      createPost({ threadId, parentId = null, authorName, visitorId, content, createdBy = null }) {
         return runInTransaction(() => {
           // ① 投稿先スレッドの実在確認
           const thread = stmts.getThreadById.get(threadId);
@@ -423,9 +600,9 @@ function createBoardDb(options = {}) {
           }
 
           // ④ 投稿行の挿入（DB側の複合外部キー・2引数trim CHECK制約でも二重に検証される）
-          const info = stmts.insertPost.run(threadId, parentId, authorName, visitorId, content);
+          const info = stmts.insertPost.run(threadId, parentId, authorName, visitorId, content, createdBy);
           const newPostId = Number(info.lastInsertRowid);
-          return toPlain(stmts.getPublicPostById.get(newPostId));
+          return toPublicPost(stmts.getPublicPostById.get(newPostId));
         });
       },
 
@@ -471,6 +648,17 @@ function createBoardDb(options = {}) {
           }
           if (existing.is_deleted === 1) {
             throw new ValidationError('論理削除済みの投稿は編集できません。', 400);
+          }
+          if (
+            existing.created_by !== null &&
+            authorName !== undefined &&
+            authorName !== null &&
+            String(authorName) !== existing.author_name
+          ) {
+            throw new ValidationError(
+              '会員アカウントに紐づく投稿の投稿者名は変更できません（本文のみ編集可能です）。',
+              400
+            );
           }
 
           const validated = validatePostInput({
@@ -850,6 +1038,224 @@ function createBoardDb(options = {}) {
           }
           throw err;
         }
+      },
+
+      // ---------------------------------------------------------------
+      // ユーザー・セッション認証操作（すべて同期トランザクション内で完結させ、scrypt待機を持ち込まない）
+      // ---------------------------------------------------------------
+      createUserWithSession({
+        username,
+        passwordHash,
+        role = 'user',
+        tokenHash,
+        expiresAt,
+        nowIso,
+        mustChangePassword = false,
+      }) {
+        const cleanUsername = validateUsername(username);
+        const cleanRole = validateUserRole(role);
+        return runInTransaction(() => {
+          try {
+            const info = stmts.insertUser.run(
+              cleanUsername,
+              passwordHash,
+              cleanRole,
+              mustChangePassword ? 1 : 0
+            );
+            const userId = Number(info.lastInsertRowid);
+            stmts.insertSession.run(userId, tokenHash, expiresAt, nowIso);
+            const created = stmts.getUserById.get(userId);
+            return toPublicUser(created);
+          } catch (err) {
+            if (isUniqueConstraintError(err)) {
+              throw new ValidationError('このユーザー名は既に使用されています。', 409);
+            }
+            throw err;
+          }
+        });
+      },
+
+      createUser({ username, passwordHash, role = 'user', mustChangePassword = false }) {
+        const cleanUsername = validateUsername(username);
+        const cleanRole = validateUserRole(role);
+        return runInTransaction(() => {
+          try {
+            const info = stmts.insertUser.run(
+              cleanUsername,
+              passwordHash,
+              cleanRole,
+              mustChangePassword ? 1 : 0
+            );
+            const userId = Number(info.lastInsertRowid);
+            return toPublicUser(stmts.getUserById.get(userId));
+          } catch (err) {
+            if (isUniqueConstraintError(err)) {
+              throw new ValidationError(`ユーザー名「${cleanUsername}」は既に登録されています。`, 409);
+            }
+            throw err;
+          }
+        });
+      },
+
+      getUserForAuthByUsername(username) {
+        const cleanUsername = validateUsername(username);
+        return toPlain(stmts.getUserByUsername.get(cleanUsername));
+      },
+
+      listUsers(nowIso = new Date().toISOString()) {
+        return stmts.listUsersSummary.all(nowIso).map((row) => ({
+          id: Number(row.id),
+          username: row.username,
+          role: row.role,
+          auth_version: Number(row.auth_version),
+          mustChangePassword: Boolean(row.must_change_password),
+          active_sessions: Number(row.active_sessions),
+          created_at: row.created_at,
+        }));
+      },
+
+      // 非同期 scrypt 照合完了後に auth_version 一致を検証したうえでセッションを発行する
+      issueSessionIfVersionMatches({
+        userId,
+        expectedAuthVersion,
+        tokenHash,
+        expiresAt,
+        nowIso,
+        maxSessions = 5,
+        replaceTokenHash = null,
+      }) {
+        return runInTransaction(() => {
+          const user = stmts.getUserById.get(userId);
+          if (!user || Number(user.auth_version) !== Number(expectedAuthVersion)) {
+            return { issued: false, reason: 'AUTH_VERSION_MISMATCH', user: null };
+          }
+          pruneAndInsertSession({
+            userId: Number(user.id),
+            tokenHash,
+            expiresAt,
+            nowIso,
+            maxSessions,
+            replaceTokenHash,
+          });
+          return { issued: true, user: toPublicUser(user) };
+        });
+      },
+
+      getSessionAuthByTokenHash(tokenHash, nowIso) {
+        const row = stmts.getSessionAndUserByTokenHash.get(tokenHash);
+        if (!row) {
+          return null;
+        }
+        if (String(row.expires_at) <= String(nowIso)) {
+          return null;
+        }
+        return {
+          sessionId: Number(row.session_id),
+          tokenHash: row.token_hash,
+          expiresAt: row.expires_at,
+          authVersion: Number(row.auth_version),
+          passwordHash: row.password_hash,
+          user: {
+            id: Number(row.user_id),
+            username: row.username,
+            role: row.role,
+            mustChangePassword: Boolean(row.must_change_password),
+          },
+        };
+      },
+
+      deleteSessionByTokenHash(tokenHash) {
+        const info = stmts.deleteSessionByTokenHash.run(tokenHash);
+        return Number(info.changes ?? 0);
+      },
+
+      purgeExpiredSessions(nowIso, limit = 200) {
+        const safeLimit = Math.max(1, Math.min(1000, Number(limit) || 200));
+        const info = stmts.deleteExpiredSessionsBatch.run(nowIso, safeLimit);
+        return Number(info.changes ?? 0);
+      },
+
+      // R1契約: ロック外での scrypt 完了後、確定時に世代一致かつ元セッションが現存・期限内かを再確認し全更新する
+      changePasswordIfUnchanged({
+        userId,
+        expectedAuthVersion,
+        sessionTokenHash,
+        newPasswordHash,
+        nowIso,
+      }) {
+        return runInTransaction(() => {
+          const user = stmts.getUserById.get(userId);
+          if (!user || Number(user.auth_version) !== Number(expectedAuthVersion)) {
+            return { updated: false, reason: 'AUTH_VERSION_MISMATCH' };
+          }
+          const sess = stmts.getSessionAndUserByTokenHash.get(sessionTokenHash);
+          if (!sess || Number(sess.user_id) !== Number(userId) || String(sess.expires_at) <= String(nowIso)) {
+            return { updated: false, reason: 'SESSION_INVALID' };
+          }
+          stmts.updatePasswordAndBumpVersion.run(newPasswordHash, 0, userId);
+          stmts.deleteAllSessionsForUser.run(userId);
+          return { updated: true };
+        });
+      },
+
+      resetPasswordByUsername({ username, newPasswordHash }) {
+        const cleanUsername = validateUsername(username);
+        return runInTransaction(() => {
+          const user = stmts.getUserByUsername.get(cleanUsername);
+          if (!user) {
+            return { found: false, user: null };
+          }
+          stmts.updatePasswordAndBumpVersion.run(newPasswordHash, 1, user.id);
+          const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
+          const updated = stmts.getUserById.get(user.id);
+          return {
+            found: true,
+            revokedSessions: Number(deletedInfo.changes ?? 0),
+            user: toPublicUser(updated),
+          };
+        });
+      },
+
+      setUserRoleByUsername({ username, role }) {
+        const cleanUsername = validateUsername(username);
+        const cleanRole = validateUserRole(role);
+        return runInTransaction(() => {
+          const user = stmts.getUserByUsername.get(cleanUsername);
+          if (!user) {
+            return { found: false, user: null };
+          }
+          stmts.updateRoleAndBumpVersion.run(cleanRole, user.id);
+          const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
+          const updated = stmts.getUserById.get(user.id);
+          return {
+            found: true,
+            revokedSessions: Number(deletedInfo.changes ?? 0),
+            user: toPublicUser(updated),
+          };
+        });
+      },
+
+      revokeAllSessionsByUsername(username) {
+        const cleanUsername = validateUsername(username);
+        return runInTransaction(() => {
+          const user = stmts.getUserByUsername.get(cleanUsername);
+          if (!user) {
+            return { found: false, revokedSessions: 0, user: null };
+          }
+          stmts.bumpUserAuthVersion.run(user.id);
+          const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
+          const updated = stmts.getUserById.get(user.id);
+          return {
+            found: true,
+            revokedSessions: Number(deletedInfo.changes ?? 0),
+            user: toPublicUser(updated),
+          };
+        });
+      },
+
+      clearAllSessions() {
+        const info = stmts.deleteAllSessions.run();
+        return Number(info.changes ?? 0);
       },
 
       // DB制約テスト（test/db.test.js）で直接異常SQLの拒否を検証するための限定実行ヘルパー

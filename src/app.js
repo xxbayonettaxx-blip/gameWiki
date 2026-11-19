@@ -19,10 +19,28 @@ const {
   ValidationError,
   parsePositiveInt,
   validatePostInput,
+  validateAuthRegisterInput,
+  validateAuthLoginInput,
+  validateChangePasswordInput,
   validateIdSecret,
   generateVisitorId,
   extractClientIp,
 } = require('./validators');
+const {
+  SESSION_TTL_SECONDS,
+  MAX_SESSIONS_PER_USER,
+  AUTH_MAX_BODY_BYTES,
+  AuthQueueFullError,
+  createScryptQueue,
+  generateSessionToken,
+  hashSessionToken,
+  isSecureRequest,
+  parseSessionCookie,
+  hasAnyCookieHeader,
+  buildSetSessionCookieHeader,
+  buildClearSessionCookieHeader,
+  normalizeAllowedOrigin,
+} = require('./auth');
 
 const DEFAULT_PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 
@@ -67,27 +85,57 @@ function sendJson(res, statusCode, payload, extraHeaders = {}) {
 }
 
 // ---------------------------------------------------------------------
-// 2. 更新系API（POST）向けの CSRF / Content-Type 防御検査
-// フォーム送信等の単純リクエストによるCSRFや、別オリジンからの不正要求を拒否する。
+// 2. 更新系API（POST）向けの CSRF / Content-Type / Origin完全一致 防御検査
+// フォーム送信等の単純リクエストによるCSRFや、別オリジン・スキーム違いからの不正要求を拒否する。
 // ---------------------------------------------------------------------
-function verifyMutatingRequestHeaders(req) {
+function verifyMutatingRequestHeaders(
+  req,
+  { requireOrigin = false, allowedOrigin = null, trustProxy = false } = {}
+) {
   // Sec-Fetch-Site が cross-site の場合は即拒否
   const secFetchSite = req.headers['sec-fetch-site'];
   if (secFetchSite === 'cross-site') {
     throw new ValidationError('外部サイトからの更新要求は許可されていません。', 403);
   }
 
-  // Origin ヘッダーが存在する場合、Host ヘッダーと一致するか検証
-  const origin = req.headers.origin;
-  if (typeof origin === 'string' && origin.trim() !== '') {
-    let originHost;
+  let expectedOrigin = allowedOrigin;
+  if (!expectedOrigin) {
+    const rawHost = String(req.headers.host || '').trim();
+    if (!rawHost) {
+      throw new ValidationError('Host ヘッダーが不足しています。', 403);
+    }
+    const scheme = isSecureRequest(req, { trustProxy }) ? 'https' : 'http';
     try {
-      originHost = new URL(origin).host.toLowerCase();
+      const hostUrl = new URL(`${scheme}://${rawHost}`);
+      if (hostUrl.host.toLowerCase() !== rawHost.toLowerCase()) {
+        throw new Error('host mismatch');
+      }
+      expectedOrigin = hostUrl.origin.toLowerCase();
+    } catch {
+      throw new ValidationError('不正な Host ヘッダーです。', 403);
+    }
+  } else {
+    expectedOrigin = expectedOrigin.toLowerCase();
+  }
+
+  // Origin ヘッダーが存在する場合（または必須ルート時）、scheme+host+port を完全一致検証
+  const origin = req.headers.origin;
+  if (origin === undefined) {
+    if (requireOrigin) {
+      throw new ValidationError('Origin ヘッダーが必要です。', 403);
+    }
+  } else {
+    const trimmedOrigin = typeof origin === 'string' ? origin.trim() : '';
+    if (trimmedOrigin === '' || trimmedOrigin.toLowerCase() === 'null') {
+      throw new ValidationError('不正な Origin ヘッダーです。', 403);
+    }
+    let originNormalized;
+    try {
+      originNormalized = new URL(trimmedOrigin).origin.toLowerCase();
     } catch {
       throw new ValidationError('不正な Origin ヘッダーです。', 403);
     }
-    const requestHost = String(req.headers.host || '').toLowerCase();
-    if (!requestHost || originHost !== requestHost) {
+    if (!originNormalized || originNormalized === 'null' || originNormalized !== expectedOrigin) {
       throw new ValidationError('送信元オリジンが一致しません。', 403);
     }
   }
@@ -98,6 +146,51 @@ function verifyMutatingRequestHeaders(req) {
   if (mediaType !== 'application/json') {
     throw new ValidationError('Content-Type には application/json を指定してください。', 415);
   }
+}
+
+// ---------------------------------------------------------------------
+// 2b. 上限・TTL付きのスライディングウィンドウ制限ヘルパー（Map肥大化防止）
+// ---------------------------------------------------------------------
+function createWindowLimiter({ windowMs, maxHits, maxEntries = 2000 }) {
+  const map = new Map();
+
+  function sweepIfFull(currentMs) {
+    if (map.size < maxEntries) return;
+    for (const [k, entry] of map.entries()) {
+      if (entry.resetAt <= currentMs) {
+        map.delete(k);
+      }
+    }
+    while (map.size >= maxEntries) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey === undefined) break;
+      map.delete(oldestKey);
+    }
+  }
+
+  function isBlocked(key, currentMs) {
+    const existing = map.get(key);
+    if (!existing || existing.resetAt <= currentMs) {
+      return false;
+    }
+    return existing.count >= maxHits;
+  }
+
+  function consume(key, currentMs) {
+    sweepIfFull(currentMs);
+    const existing = map.get(key);
+    if (!existing || existing.resetAt <= currentMs) {
+      map.set(key, { count: 1, resetAt: currentMs + windowMs });
+      return true;
+    }
+    if (existing.count >= maxHits) {
+      return false;
+    }
+    existing.count += 1;
+    return true;
+  }
+
+  return { isBlocked, consume };
 }
 
 // ---------------------------------------------------------------------
@@ -197,9 +290,21 @@ function createApp(options = {}) {
     idSecret,
     adminToken = null,
     trustProxy = false,
-    maxBodyBytes = 1024 * 1024, // 既定上限: 1MB
-    rateLimitWindowMs = 60_000, // レート制限窓: 60秒
+    allowedOrigin = null,
+    allowSignup = true,
+    devInsecureCookie = false,
+    maxBodyBytes = 1024 * 1024, // 通常投稿の既定上限: 1MB
+    authMaxBodyBytes = AUTH_MAX_BODY_BYTES, // 認証系APIの既定上限: 4KB
+    rateLimitWindowMs = 60_000, // 通常投稿レート制限窓: 60秒
     rateLimitMaxPosts = 20, // 60秒あたり同一IPから最大20投稿
+    authRateLimitWindowMs = 5 * 60_000, // 認証レート制限窓: 5分
+    authRateLimitMaxPerIp = 15,
+    authRateLimitMaxPerAccount = 10,
+    rateLimitMaxEntries = 2000,
+    sessionTtlSeconds = SESSION_TTL_SECONDS,
+    maxSessionsPerUser = MAX_SESSIONS_PER_USER,
+    scryptQueue: customScryptQueue = null,
+    scryptOptions = {},
     publicDir = DEFAULT_PUBLIC_DIR,
     nowFn = () => new Date(),
     quiet = false,
@@ -210,6 +315,11 @@ function createApp(options = {}) {
   }
   const validIdSecret = validateIdSecret(idSecret);
   const resolvedPublicDir = path.resolve(publicDir);
+  const configuredAllowedOrigin = normalizeAllowedOrigin(allowedOrigin);
+  const signupEnabled = allowSignup !== false && String(allowSignup).toLowerCase() !== 'false';
+  const allowDevInsecureCookie =
+    devInsecureCookie === true || String(devInsecureCookie).toLowerCase() === 'true';
+  const scryptQueue = customScryptQueue || createScryptQueue(scryptOptions);
 
   // ADMIN_TOKEN が未設定または見本値のままならHTTP管理削除を無効化する
   const validAdminToken =
@@ -219,29 +329,78 @@ function createApp(options = {}) {
       ? adminToken.trim()
       : null;
 
-  // メモリ内レート制限テーブル（IP -> { count, resetAt }）
-  const rateLimitMap = new Map();
+  const postLimiter = createWindowLimiter({
+    windowMs: rateLimitWindowMs,
+    maxHits: rateLimitMaxPosts,
+    maxEntries: rateLimitMaxEntries,
+  });
+  const authIpLimiter = createWindowLimiter({
+    windowMs: authRateLimitWindowMs,
+    maxHits: authRateLimitMaxPerIp,
+    maxEntries: rateLimitMaxEntries,
+  });
+  const authAccountFailLimiter = createWindowLimiter({
+    windowMs: authRateLimitWindowMs,
+    maxHits: authRateLimitMaxPerAccount,
+    maxEntries: rateLimitMaxEntries,
+  });
 
-  function checkRateLimit(clientIp, currentMs) {
-    // 長期稼働時のメモリ肥大化を防ぐため、要素数が増えたら期限切れを一括掃除
-    if (rateLimitMap.size > 2000) {
-      for (const [ip, entry] of rateLimitMap.entries()) {
-        if (entry.resetAt <= currentMs) {
-          rateLimitMap.delete(ip);
-        }
-      }
-    }
+  const authMetrics = {
+    registerSuccess: 0,
+    loginSuccess: 0,
+    loginFailure: 0,
+    rateLimited429: 0,
+    queueRejected503: 0,
+    passwordChanged: 0,
+  };
 
-    const existing = rateLimitMap.get(clientIp);
-    if (!existing || existing.resetAt <= currentMs) {
-      rateLimitMap.set(clientIp, { count: 1, resetAt: currentMs + rateLimitWindowMs });
-      return true;
+  let lastPurgeMs = 0;
+  const SESSION_PURGE_INTERVAL_MS = 10 * 60_000;
+
+  function purgeExpiredSessionsIfDue(currentMs, nowIso) {
+    if (currentMs - lastPurgeMs >= SESSION_PURGE_INTERVAL_MS) {
+      lastPurgeMs = currentMs;
+      db.purgeExpiredSessions(nowIso, 200);
     }
-    if (existing.count >= rateLimitMaxPosts) {
-      return false;
+  }
+
+  function ensureCookieTransportSafe(req) {
+    if (!allowDevInsecureCookie && !isSecureRequest(req, { trustProxy })) {
+      throw new ValidationError(
+        'HTTPS接続が確認できないため認証セッションを発行できません。',
+        403
+      );
     }
-    existing.count += 1;
-    return true;
+  }
+
+  function resolveRequestSession(req, nowIso) {
+    const cookieState = parseSessionCookie(req, { devInsecureCookie: allowDevInsecureCookie });
+    if (!cookieState.present) {
+      return { status: 'none', cookieState, tokenHash: null, auth: null };
+    }
+    if (cookieState.invalid) {
+      return { status: 'invalid', cookieState, tokenHash: null, auth: null };
+    }
+    const tokenHash = hashSessionToken(cookieState.token);
+    const auth = db.getSessionAuthByTokenHash(tokenHash, nowIso);
+    if (!auth) {
+      return { status: 'invalid', cookieState, tokenHash, auth: null };
+    }
+    return { status: 'valid', cookieState, tokenHash, auth };
+  }
+
+  function buildClearCookieHeaders() {
+    return {
+      'Set-Cookie': buildClearSessionCookieHeader({ devInsecureCookie: allowDevInsecureCookie }),
+    };
+  }
+
+  function checkMutatingHeaders(req, { requireOrigin = false } = {}) {
+    verifyMutatingRequestHeaders(req, {
+      requireOrigin,
+      allowedOrigin: configuredAllowedOrigin,
+      trustProxy,
+    });
   }
 
   // -------------------------------------------------------------------
@@ -405,6 +564,286 @@ function createApp(options = {}) {
         return;
       }
 
+      // [GET] 現在のログイン状態取得
+      if (pathname === '/api/auth/me') {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const nowDate = nowFn();
+        const nowIso = nowDate.toISOString();
+        purgeExpiredSessionsIfDue(nowDate.getTime(), nowIso);
+        const sess = resolveRequestSession(req, nowIso);
+        if (sess.status === 'invalid') {
+          sendJson(res, 200, { user: null }, buildClearCookieHeaders());
+          return;
+        }
+        sendJson(res, 200, { user: sess.status === 'valid' ? sess.auth.user : null });
+        return;
+      }
+
+      // [POST] 新規アカウント登録＋即ログイン
+      if (pathname === '/api/auth/register') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'POST メソッドを使用してください。' }, { Allow: 'POST' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+
+        const clientIp = extractClientIp(req, { trustProxy });
+        const nowDate = nowFn();
+        const nowMs = nowDate.getTime();
+        purgeExpiredSessionsIfDue(nowMs, nowDate.toISOString());
+
+        if (!authIpLimiter.consume(clientIp, nowMs)) {
+          authMetrics.rateLimited429 += 1;
+          sendJson(res, 429, {
+            error: '認証リクエストが集中しています。少し時間をおいてから再試行してください。',
+          });
+          return;
+        }
+
+        const rawBody = await readJsonBody(req, authMaxBodyBytes);
+        if (!signupEnabled) {
+          sendJson(res, 403, { error: '現在、新規アカウント登録の受付を一時停止しています。' });
+          return;
+        }
+        ensureCookieTransportSafe(req);
+
+        const validInput = validateAuthRegisterInput(rawBody);
+        const passwordHash = await scryptQueue.hashPassword(validInput.password);
+
+        const commitDate = nowFn();
+        const commitIso = commitDate.toISOString();
+        const expiresAt = new Date(commitDate.getTime() + sessionTtlSeconds * 1000).toISOString();
+        const rawToken = generateSessionToken();
+        const tokenHash = hashSessionToken(rawToken);
+
+        const user = db.createUserWithSession({
+          username: validInput.username,
+          passwordHash,
+          role: 'user',
+          tokenHash,
+          expiresAt,
+          nowIso: commitIso,
+        });
+
+        authMetrics.registerSuccess += 1;
+        sendJson(
+          res,
+          201,
+          { user },
+          {
+            'Set-Cookie': buildSetSessionCookieHeader(rawToken, {
+              devInsecureCookie: allowDevInsecureCookie,
+              maxAgeSeconds: sessionTtlSeconds,
+            }),
+          }
+        );
+        return;
+      }
+
+      // [POST] ログイン
+      if (pathname === '/api/auth/login') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'POST メソッドを使用してください。' }, { Allow: 'POST' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+
+        const clientIp = extractClientIp(req, { trustProxy });
+        const nowDate = nowFn();
+        const nowMs = nowDate.getTime();
+        purgeExpiredSessionsIfDue(nowMs, nowDate.toISOString());
+
+        if (!authIpLimiter.consume(clientIp, nowMs)) {
+          authMetrics.rateLimited429 += 1;
+          sendJson(res, 429, {
+            error: '認証リクエストが集中しています。少し時間をおいてから再試行してください。',
+          });
+          return;
+        }
+
+        const rawBody = await readJsonBody(req, authMaxBodyBytes);
+        ensureCookieTransportSafe(req);
+
+        const validInput = validateAuthLoginInput(rawBody);
+        if (authAccountFailLimiter.isBlocked(validInput.username, nowMs)) {
+          authMetrics.rateLimited429 += 1;
+          sendJson(res, 429, {
+            error: 'ログイン試行が集中しています。少し時間をおいてから再試行してください。',
+          });
+          return;
+        }
+
+        const authUser = db.getUserForAuthByUsername(validInput.username);
+        let isMatch = false;
+        let expectedAuthVersion = 0;
+
+        if (!authUser) {
+          await scryptQueue.verifyDummyPassword(validInput.password);
+        } else {
+          expectedAuthVersion = Number(authUser.auth_version);
+          isMatch = await scryptQueue.verifyPassword(validInput.password, authUser.password_hash);
+        }
+
+        if (!authUser || !isMatch) {
+          authAccountFailLimiter.consume(validInput.username, nowMs);
+          authMetrics.loginFailure += 1;
+          sendJson(res, 401, { error: 'ユーザー名またはパスワードが正しくありません。' });
+          return;
+        }
+
+        const existingCookie = parseSessionCookie(req, { devInsecureCookie: allowDevInsecureCookie });
+        const replaceTokenHash =
+          !existingCookie.invalid && existingCookie.token
+            ? hashSessionToken(existingCookie.token)
+            : null;
+
+        const commitDate = nowFn();
+        const commitIso = commitDate.toISOString();
+        const expiresAt = new Date(commitDate.getTime() + sessionTtlSeconds * 1000).toISOString();
+        const rawToken = generateSessionToken();
+        const tokenHash = hashSessionToken(rawToken);
+
+        const issued = db.issueSessionIfVersionMatches({
+          userId: authUser.id,
+          expectedAuthVersion,
+          tokenHash,
+          expiresAt,
+          nowIso: commitIso,
+          maxSessions: maxSessionsPerUser,
+          replaceTokenHash,
+        });
+
+        if (!issued.issued) {
+          authMetrics.loginFailure += 1;
+          sendJson(res, 401, {
+            error: '認証状態が更新されたためログインを完了できませんでした。再度お試しください。',
+          });
+          return;
+        }
+
+        authMetrics.loginSuccess += 1;
+        sendJson(
+          res,
+          200,
+          { user: issued.user },
+          {
+            'Set-Cookie': buildSetSessionCookieHeader(rawToken, {
+              devInsecureCookie: allowDevInsecureCookie,
+              maxAgeSeconds: sessionTtlSeconds,
+            }),
+          }
+        );
+        return;
+      }
+
+      // [POST] ログアウト（仮パスワード中でも常に許可・冪等）
+      if (pathname === '/api/auth/logout') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'POST メソッドを使用してください。' }, { Allow: 'POST' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        await readJsonBody(req, authMaxBodyBytes);
+
+        const cookieState = parseSessionCookie(req, { devInsecureCookie: allowDevInsecureCookie });
+        if (!cookieState.invalid && cookieState.token) {
+          db.deleteSessionByTokenHash(hashSessionToken(cookieState.token));
+        }
+
+        sendJson(res, 200, { ok: true }, buildClearCookieHeaders());
+        return;
+      }
+
+      // [POST] 本人によるパスワード変更（R1: 確定時に世代一致と現セッション生存を再確認）
+      if (pathname === '/api/auth/password') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'POST メソッドを使用してください。' }, { Allow: 'POST' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+
+        const clientIp = extractClientIp(req, { trustProxy });
+        const nowDate = nowFn();
+        const nowMs = nowDate.getTime();
+        const nowIso = nowDate.toISOString();
+        purgeExpiredSessionsIfDue(nowMs, nowIso);
+
+        if (!authIpLimiter.consume(clientIp, nowMs)) {
+          authMetrics.rateLimited429 += 1;
+          sendJson(res, 429, {
+            error: 'リクエストが集中しています。少し時間をおいてから再試行してください。',
+          });
+          return;
+        }
+
+        const rawBody = await readJsonBody(req, authMaxBodyBytes);
+        const authNowDate = nowFn();
+        const authNowMs = authNowDate.getTime();
+        const authNowIso = authNowDate.toISOString();
+        const sess = resolveRequestSession(req, authNowIso);
+        if (sess.status !== 'valid') {
+          sendJson(
+            res,
+            401,
+            { error: 'ログインの有効期限が切れているか未ログインです。' },
+            sess.status === 'invalid' ? buildClearCookieHeaders() : {}
+          );
+          return;
+        }
+
+        const validInput = validateChangePasswordInput(rawBody);
+        const userId = sess.auth.user.id;
+        const username = sess.auth.user.username;
+        const expectedAuthVersion = sess.auth.authVersion;
+        const sessionTokenHash = sess.tokenHash;
+        const currentHash = sess.auth.passwordHash;
+
+        if (authAccountFailLimiter.isBlocked(username, authNowMs)) {
+          authMetrics.rateLimited429 += 1;
+          sendJson(res, 429, {
+            error: '認証試行が集中しています。少し時間をおいてから再試行してください。',
+          });
+          return;
+        }
+
+        const currentOk = await scryptQueue.verifyPassword(validInput.currentPassword, currentHash);
+        if (!currentOk) {
+          authAccountFailLimiter.consume(username, authNowMs);
+          authMetrics.loginFailure += 1;
+          sendJson(res, 401, { error: '現在のパスワードが正しくありません。' });
+          return;
+        }
+
+        const newPasswordHash = await scryptQueue.hashPassword(validInput.newPassword);
+        const confirmIso = nowFn().toISOString();
+        const changed = db.changePasswordIfUnchanged({
+          userId,
+          expectedAuthVersion,
+          sessionTokenHash,
+          newPasswordHash,
+          nowIso: confirmIso,
+        });
+
+        if (!changed.updated) {
+          sendJson(
+            res,
+            401,
+            {
+              error: '認証状態が更新されたかセッションが失効したため変更できませんでした。再度ログインしてください。',
+            },
+            buildClearCookieHeaders()
+          );
+          return;
+        }
+
+        authMetrics.passwordChanged += 1;
+        sendJson(res, 200, { ok: true }, buildClearCookieHeaders());
+        return;
+      }
+
       // [POST] 新規投稿・ツリー返信の登録
       if (pathname === '/api/posts') {
         if (req.method !== 'POST') {
@@ -412,11 +851,12 @@ function createApp(options = {}) {
           return;
         }
 
-        verifyMutatingRequestHeaders(req);
+        const anyCookie = hasAnyCookieHeader(req);
+        checkMutatingHeaders(req, { requireOrigin: anyCookie });
 
         const clientIp = extractClientIp(req, { trustProxy });
-        const nowDate = nowFn();
-        if (!checkRateLimit(clientIp, nowDate.getTime())) {
+        const rateLimitNowMs = nowFn().getTime();
+        if (!postLimiter.consume(clientIp, rateLimitNowMs)) {
           sendJson(res, 429, {
             error: '短時間に投稿が集中しています。少し時間をおいてから再試行してください。',
           });
@@ -424,19 +864,50 @@ function createApp(options = {}) {
         }
 
         const rawBody = await readJsonBody(req, maxBodyBytes);
-        const validInput = validatePostInput(rawBody);
+        // 本文読取り完了後の時刻でセッション期限と日替わりIDを一貫判定する（読取中の期限切れ通過を防止）
+        const actionNowDate = nowFn();
+        const actionNowIso = actionNowDate.toISOString();
+        const sess = resolveRequestSession(req, actionNowIso);
+
+        // 無効・期限切れCookieが付いていた場合は黙って匿名化せず、明確な401で再送信選択させる
+        if (sess.status === 'invalid') {
+          sendJson(
+            res,
+            401,
+            {
+              error:
+                'ログインの有効期限が切れています。再ログインするか、ログアウト状態（匿名）として再送信してください。',
+              code: 'SESSION_EXPIRED',
+            },
+            buildClearCookieHeaders()
+          );
+          return;
+        }
+
+        // R2: 仮パスワード中の通常投稿を403で拒否する
+        if (sess.status === 'valid' && sess.auth.user.mustChangePassword) {
+          sendJson(res, 403, {
+            error: '仮パスワードのままでは投稿できません。先にパスワードを変更してください。',
+            code: 'PASSWORD_CHANGE_REQUIRED',
+          });
+          return;
+        }
+
+        const isMemberPost = sess.status === 'valid';
+        const validInput = validatePostInput(rawBody, { ignoreAuthorName: isMemberPost });
         const visitorId = generateVisitorId({
           ip: clientIp,
           secret: validIdSecret,
-          now: nowDate,
+          now: actionNowDate,
         });
 
         const createdPost = db.createPost({
           threadId: validInput.threadId,
           parentId: validInput.parentId,
-          authorName: validInput.authorName,
+          authorName: isMemberPost ? sess.auth.user.username : validInput.authorName,
           visitorId,
           content: validInput.content,
+          createdBy: isMemberPost ? sess.auth.user.id : null,
         });
 
         sendJson(res, 201, { post: createdPost });
@@ -451,7 +922,7 @@ function createApp(options = {}) {
           return;
         }
 
-        verifyMutatingRequestHeaders(req);
+        checkMutatingHeaders(req, { requireOrigin: hasAnyCookieHeader(req) });
 
         if (!verifyAdminBearerToken(req, validAdminToken)) {
           sendJson(res, 401, { error: '管理者認証が必要です。' });
@@ -478,7 +949,7 @@ function createApp(options = {}) {
           return;
         }
 
-        verifyMutatingRequestHeaders(req);
+        checkMutatingHeaders(req, { requireOrigin: hasAnyCookieHeader(req) });
 
         if (!verifyAdminBearerToken(req, validAdminToken)) {
           sendJson(res, 401, { error: '管理者認証が必要です。' });
@@ -512,9 +983,12 @@ function createApp(options = {}) {
       if (err instanceof ValidationError) {
         const extra = err.statusCode === 413 ? { Connection: 'close' } : {};
         sendJson(res, err.statusCode, { error: err.message }, extra);
+      } else if (err instanceof AuthQueueFullError) {
+        authMetrics.queueRejected503 += 1;
+        sendJson(res, 503, { error: err.message }, { 'Retry-After': '2' });
       } else {
         if (!quiet) {
-          console.error('[ERROR] リクエスト処理中に予期せぬ例外が発生しました:', err);
+          console.error('[ERROR] リクエスト処理中に予期せぬ例外が発生しました:', err?.message || 'unknown error');
         }
         if (!res.headersSent) {
           sendJson(res, 500, { error: 'サーバー内部でエラーが発生しました。時間をおいて再試行してください。' });
@@ -533,6 +1007,11 @@ function createApp(options = {}) {
   // スローロリス等の長時間接続滞留を抑制する明示タイムアウト設定
   server.headersTimeout = 15000;
   server.requestTimeout = 30000;
+
+  server.getAuthMetrics = () => ({
+    ...authMetrics,
+    scryptQueue: scryptQueue.getStats(),
+  });
 
   return server;
 }

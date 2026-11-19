@@ -7,14 +7,18 @@
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
--- 1. ユーザーテーブル（外部キー参照元のため先に定義。v0.5は未使用・v1.0ログイン用予約）
+-- 1. ユーザーテーブル（外部キー参照元のため先に定義。v1.0認証対応）
 -- ※ char(12288)=全角空白(U+3000), char(9)=タブ, char(10)=LF, char(13)=CR を除去して空欄を拒否
+-- ※ auth_version: パスワード変更/強制リセット/ロール変更時に加算し、進行中ログイン/変更の競合発行を防ぐ
+-- ※ must_change_password: 管理者リセット時の仮パスワード強制変更フラグ（1のあいだ通常投稿等を制限）
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE
         CHECK(length(trim(username, ' ' || char(12288) || char(9) || char(10) || char(13))) >= 3 AND length(username) <= 30),
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
+    auth_version INTEGER NOT NULL DEFAULT 0,
+    must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
@@ -70,3 +74,18 @@ CREATE TABLE IF NOT EXISTS posts (
 -- 5. 検索・一覧取得用インデックス
 CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category_id, is_pinned DESC, display_order ASC, id);
 CREATE INDEX IF NOT EXISTS idx_posts_thread_parent ON posts(thread_id, parent_id, id);
+
+-- 6. ログインセッションテーブル（v1.0認証用）
+-- ・ブラウザCookieには高エントロピーな生トークンを渡し、DBにはSHA-256ハッシュ(64桁hex)のみを保存する
+-- ・ユーザー削除時は ON DELETE CASCADE によりセッションも自動消去する
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash) = 64),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);

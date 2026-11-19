@@ -16,9 +16,28 @@ const path = require('node:path');
 const { createBoardDb } = require('../src/db');
 const { runSeed } = require('../src/seed');
 const { createApp } = require('../src/app');
+const { createScryptQueue, HTTPS_SESSION_COOKIE_NAME, DEV_SESSION_COOKIE_NAME } = require('../src/auth');
 
 const TEST_ID_SECRET = 'test_secret_key_for_api_suite_32chars!';
 const TEST_ADMIN_TOKEN = 'test_admin_token_for_api_suite_32chars!';
+
+function makeFastScryptFn() {
+  const crypto = require('node:crypto');
+  return async (password, salt, keylen) =>
+    crypto.createHmac('sha256', salt).update(String(password)).digest().subarray(0, keylen).length === keylen
+      ? crypto.createHmac('sha256', salt).update(String(password)).digest()
+      : Buffer.concat([
+          crypto.createHmac('sha256', salt).update(String(password)).digest(),
+          crypto.createHmac('sha256', salt).update(`ext:${password}`).digest(),
+        ]);
+}
+
+function extractSetCookiePair(res) {
+  const raw = res.headers.get('set-cookie');
+  if (!raw) return null;
+  const firstPart = raw.split(';')[0];
+  return firstPart;
+}
 
 async function startTestServer(customOptions = {}) {
   const db = createBoardDb({ dbPath: ':memory:', ...customOptions.dbOptions });
@@ -28,8 +47,21 @@ async function startTestServer(customOptions = {}) {
     db,
     idSecret: TEST_ID_SECRET,
     adminToken: TEST_ADMIN_TOKEN,
+    trustProxy: customOptions.trustProxy ?? false,
+    allowedOrigin: customOptions.allowedOrigin ?? null,
+    allowSignup: customOptions.allowSignup ?? true,
+    devInsecureCookie: customOptions.devInsecureCookie ?? false,
     maxBodyBytes: customOptions.maxBodyBytes ?? 4096,
+    authMaxBodyBytes: customOptions.authMaxBodyBytes ?? 4096,
     rateLimitMaxPosts: customOptions.rateLimitMaxPosts ?? 30,
+    authRateLimitMaxPerIp: customOptions.authRateLimitMaxPerIp ?? 50,
+    authRateLimitMaxPerAccount: customOptions.authRateLimitMaxPerAccount ?? 50,
+    scryptQueue: customOptions.scryptQueue ?? null,
+    scryptOptions: customOptions.scryptOptions ?? {},
+    ...(customOptions.sessionTtlSeconds !== undefined
+      ? { sessionTtlSeconds: customOptions.sessionTtlSeconds }
+      : {}),
+    nowFn: customOptions.nowFn ?? (() => new Date()),
     publicDir: customOptions.publicDir,
     quiet: true,
   });
@@ -491,4 +523,774 @@ test('F3・F5・F6回帰検証: ジャンクション脱出遮断・送信途中
   const forceThreadOut = runMod(['purge-thread', '1', '--force']);
   assert.equal(forceThreadOut.status, 0);
   assert.ok(forceThreadOut.stdout.includes('SUCCESS'));
+});
+
+test('認証フロー統合（実scrypt）: 登録・重複409・改ざん無視・会員投稿バッジ・/と/board/両立・2端末独立logout', async (t) => {
+  // 本テストは実際の node:crypto scrypt をそのまま使用する
+  const ctx = await startTestServer({ devInsecureCookie: true });
+  t.after(() => ctx.stop());
+  const origin = ctx.baseUrl;
+
+  // 1. role='admin' や created_by 改ざんを送っても常に 'user' として登録されること
+  const regRes = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({
+      username: 'テスト太郎',
+      password: 'strong-passphrase-1234',
+      role: 'admin',
+      created_by: 999,
+    }),
+  });
+  assert.equal(regRes.status, 201);
+  const regCookie = extractSetCookiePair(regRes);
+  assert.ok(regCookie.startsWith(`${DEV_SESSION_COOKIE_NAME}=`));
+  const regData = await regRes.json();
+  assert.deepEqual(regData.user, {
+    id: 1,
+    username: 'テスト太郎',
+    role: 'user',
+    mustChangePassword: false,
+  });
+
+  // 2. 重複ユーザー名は 409 Conflict
+  const dupRes = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'テスト太郎', password: 'another-password-1234' }),
+  });
+  assert.equal(dupRes.status, 409);
+
+  // 3. '/' と '/board/' 両方で /api/auth/me および会員投稿が一致動作すること
+  const meBoardRes = await fetch(`${ctx.baseUrl}/board/api/auth/me`, {
+    headers: { Cookie: regCookie },
+  });
+  assert.equal(meBoardRes.status, 200);
+  assert.equal((await meBoardRes.json()).user.username, 'テスト太郎');
+
+  const postRes = await fetch(`${ctx.baseUrl}/board/api/posts`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: origin,
+      Cookie: regCookie,
+    },
+    body: JSON.stringify({
+      thread_id: 1,
+      author_name: '偽装したい他人名',
+      content: '会員として投稿した本文',
+    }),
+  });
+  assert.equal(postRes.status, 201);
+  const createdPost = (await postRes.json()).post;
+  assert.equal(createdPost.author_name, 'テスト太郎');
+  assert.equal(createdPost.is_member, true);
+
+  // スレッド取得JSONに password_hash や生トークンが含まれないこと + is_member が一致すること
+  const threadRaw = await (await fetch(`${ctx.baseUrl}/api/threads/1`)).text();
+  assert.equal(threadRaw.includes('scrypt$v1$'), false);
+  assert.equal(threadRaw.includes(regCookie.split('=')[1]), false);
+  const threadPosts = JSON.parse(threadRaw).posts;
+  assert.equal(threadPosts.find((p) => p.id === createdPost.id).is_member, true);
+
+  // 4. 未登録ユーザーと誤パスワードがともに同じ 401 応答になること
+  const wrongPwRes = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'テスト太郎', password: 'wrong-password-1234' }),
+  });
+  const missingUserRes = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'nonexistent_user', password: 'wrong-password-1234' }),
+  });
+  assert.equal(wrongPwRes.status, 401);
+  assert.equal(missingUserRes.status, 401);
+  assert.deepEqual(await wrongPwRes.json(), await missingUserRes.json());
+
+  // 5. 2つ目の独立セッション（Cookie jar 2）でログインし、1つ目だけ logout しても2つ目が生きること
+  const login2Res = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'テスト太郎', password: 'strong-passphrase-1234' }),
+  });
+  assert.equal(login2Res.status, 200);
+  const cookie2 = extractSetCookiePair(login2Res);
+  assert.notEqual(cookie2, regCookie);
+
+  const logout1Res = await fetch(`${ctx.baseUrl}/api/auth/logout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: regCookie },
+    body: '{}',
+  });
+  assert.equal(logout1Res.status, 200);
+  assert.ok(logout1Res.headers.get('set-cookie').includes('Max-Age=0'));
+
+  // 1つ目のCookieは無効化されているが、2つ目は有効のまま
+  assert.equal((await (await fetch(`${ctx.baseUrl}/api/auth/me`, { headers: { Cookie: regCookie } })).json()).user, null);
+  assert.equal((await (await fetch(`${ctx.baseUrl}/api/auth/me`, { headers: { Cookie: cookie2 } })).json()).user.username, 'テスト太郎');
+});
+
+test('R1競合制御: 非同期scrypt待機中のリセット・失効・logout・別端末変更による古い処理の上書き阻止', async (t) => {
+  const crypto = require('node:crypto');
+  let holdGates = [];
+  let holdNext = false;
+
+  const customScrypt = async (password, salt, keylen) => {
+    if (holdNext) {
+      await new Promise((resolve) => holdGates.push(resolve));
+    }
+    const d1 = crypto.createHmac('sha256', salt).update(String(password)).digest();
+    const d2 = crypto.createHmac('sha256', salt).update(`ext:${password}`).digest();
+    return Buffer.concat([d1, d2]).subarray(0, keylen);
+  };
+
+  const queue = createScryptQueue({ maxConcurrency: 2, maxQueue: 8, scryptFn: customScrypt });
+  const ctx = await startTestServer({ devInsecureCookie: true, scryptQueue: queue });
+  t.after(() => ctx.stop());
+  const origin = ctx.baseUrl;
+
+  const reg = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'initial-password-123' }),
+  });
+  assert.equal(reg.status, 201);
+  const sessCookie1 = extractSetCookiePair(reg);
+
+  const login2 = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'initial-password-123' }),
+  });
+  const sessCookie2 = extractSetCookiePair(login2);
+
+  // ケース1: ログイン照合待機中に revokeAllSessions が完了 -> 古いログインは発行せず401
+  holdNext = true;
+  const inflightLogin = fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'initial-password-123' }),
+  });
+  while (holdGates.length < 1) await new Promise((r) => setTimeout(r, 5));
+  ctx.db.revokeAllSessionsByUsername('race_user');
+  holdNext = false;
+  holdGates.shift()();
+  const res1 = await inflightLogin;
+  assert.equal(res1.status, 401);
+  assert.equal(res1.headers.get('set-cookie'), null);
+
+  // 再ログインしてセッションを取り直す
+  const reLogin = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'initial-password-123' }),
+  });
+  const activeCookieA = extractSetCookiePair(reLogin);
+
+  // ケース2: 本人のパスワード変更(scrypt)待機中に現セッションlogoutが完了 -> 変更確定せず401
+  holdNext = true;
+  const inflightChangeA = fetch(`${ctx.baseUrl}/api/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: activeCookieA },
+    body: JSON.stringify({ currentPassword: 'initial-password-123', newPassword: 'attacker-password-999' }),
+  });
+  while (holdGates.length < 1) await new Promise((r) => setTimeout(r, 5));
+  await fetch(`${ctx.baseUrl}/api/auth/logout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: activeCookieA },
+    body: '{}',
+  });
+  holdNext = false;
+  while (holdGates.length > 0) holdGates.shift()();
+  const res2 = await inflightChangeA;
+  assert.equal(res2.status, 401);
+
+  // 元のパスワードが維持されており、attacker-password-999 では入れないこと
+  const failAttacker = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'attacker-password-999' }),
+  });
+  assert.equal(failAttacker.status, 401);
+
+  // ケース3: 本人パスワード変更待機中に管理者reset-passwordが完了 -> 管理者設定を上書きしないこと
+  const reLoginB = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'initial-password-123' }),
+  });
+  const activeCookieB = extractSetCookiePair(reLoginB);
+
+  holdNext = true;
+  const inflightChangeB = fetch(`${ctx.baseUrl}/api/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: activeCookieB },
+    body: JSON.stringify({ currentPassword: 'initial-password-123', newPassword: 'stale-user-pass-777' }),
+  });
+  while (holdGates.length < 1) await new Promise((r) => setTimeout(r, 5));
+  const adminSalt = Buffer.alloc(16, 7);
+  const adminHash = await makeFastScryptFn()('admin-temp-pass-123', adminSalt, 64);
+  const adminFormatted = `scrypt$v1$16384$8$5$64$${adminSalt.toString('hex')}$${adminHash.toString('hex')}`;
+  ctx.db.resetPasswordByUsername({ username: 'race_user', newPasswordHash: adminFormatted });
+  holdNext = false;
+  while (holdGates.length > 0) holdGates.shift()();
+  const res3 = await inflightChangeB;
+  assert.equal(res3.status, 401);
+
+  // 仮パスワード(admin-temp-pass-123)のみが生きていること
+  const tempLogin = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'admin-temp-pass-123' }),
+  });
+  assert.equal(tempLogin.status, 200);
+  const tempData = await tempLogin.json();
+  assert.equal(tempData.user.mustChangePassword, true);
+  const tempCookie3 = extractSetCookiePair(tempLogin);
+  assert.equal(sessCookie1 !== sessCookie2, true);
+
+  // ケース4: 端末Xのパスワード変更待機中に別端末Yがパスワード変更を完了 -> Xの古い変更が401で拒否されること
+  const prepChange = await fetch(`${ctx.baseUrl}/api/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: tempCookie3 },
+    body: JSON.stringify({ currentPassword: 'admin-temp-pass-123', newPassword: 'normal-pass-1234' }),
+  });
+  assert.equal(prepChange.status, 200);
+
+  const loginX = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'normal-pass-1234' }),
+  });
+  assert.equal(loginX.status, 200);
+  const sessX = extractSetCookiePair(loginX);
+
+  const loginY = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'normal-pass-1234' }),
+  });
+  assert.equal(loginY.status, 200);
+  const sessY = extractSetCookiePair(loginY);
+
+  holdNext = true;
+  const inflightChangeX = fetch(`${ctx.baseUrl}/api/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: sessX },
+    body: JSON.stringify({ currentPassword: 'normal-pass-1234', newPassword: 'stale-x-pass-111' }),
+  });
+  while (holdGates.length < 1) await new Promise((r) => setTimeout(r, 5));
+
+  holdNext = false;
+  const winnerY = await fetch(`${ctx.baseUrl}/api/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: sessY },
+    body: JSON.stringify({ currentPassword: 'normal-pass-1234', newPassword: 'winner-y-pass-222' }),
+  });
+  assert.equal(winnerY.status, 200);
+
+  while (holdGates.length > 0) holdGates.shift()();
+  const staleResX = await inflightChangeX;
+  assert.equal(staleResX.status, 401);
+
+  const checkWinner = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'winner-y-pass-222' }),
+  });
+  assert.equal(checkWinner.status, 200);
+
+  const checkStale = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'race_user', password: 'stale-x-pass-111' }),
+  });
+  assert.equal(checkStale.status, 401);
+});
+
+test('R2仮パスワード制限・7日有効期限・期限切れ401契約・ALLOW_SIGNUP・4KB/429/503過負荷保護', async (t) => {
+  let fakeNowMs = Date.parse('2026-11-19T00:00:00.000Z');
+  const queue = createScryptQueue({ maxConcurrency: 1, maxQueue: 2, scryptFn: makeFastScryptFn() });
+  const ctx = await startTestServer({
+    devInsecureCookie: true,
+    scryptQueue: queue,
+    authRateLimitMaxPerIp: 25,
+    nowFn: () => new Date(fakeNowMs),
+  });
+  t.after(() => ctx.stop());
+  const origin = ctx.baseUrl;
+
+  await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'temp_tester', password: 'password-one-123' }),
+  });
+
+  // 1. 管理者リセット後：仮パスワードログイン -> 投稿403, meはmustChangePassword:true, logoutは200成功
+  const tempHash = await queue.hashPassword('temp-pass-9876');
+  ctx.db.resetPasswordByUsername({ username: 'temp_tester', newPasswordHash: tempHash });
+
+  const tempLogin = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'temp_tester', password: 'temp-pass-9876' }),
+  });
+  assert.equal(tempLogin.status, 200);
+  const tempCookie = extractSetCookiePair(tempLogin);
+  assert.equal((await tempLogin.json()).user.mustChangePassword, true);
+
+  const blockedPost = await fetch(`${ctx.baseUrl}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: tempCookie },
+    body: JSON.stringify({ thread_id: 1, content: '仮パスワード中の投稿阻止' }),
+  });
+  assert.equal(blockedPost.status, 403);
+  assert.equal((await blockedPost.json()).code, 'PASSWORD_CHANGE_REQUIRED');
+
+  const meTemp = await fetch(`${ctx.baseUrl}/api/auth/me`, { headers: { Cookie: tempCookie } });
+  assert.equal((await meTemp.json()).user.mustChangePassword, true);
+
+  // R2: 仮パスワード中でも logout は常に200で成功し、そのCookieが無効になる
+  const logoutTemp = await fetch(`${ctx.baseUrl}/api/auth/logout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: tempCookie },
+    body: '{}',
+  });
+  assert.equal(logoutTemp.status, 200);
+  assert.equal((await (await fetch(`${ctx.baseUrl}/api/auth/me`, { headers: { Cookie: tempCookie } })).json()).user, null);
+
+  // 再度ログインしてパスワード変更完了 -> 再ログイン後に通常投稿できること
+  const tempLogin2 = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'temp_tester', password: 'temp-pass-9876' }),
+  });
+  const tempCookie2 = extractSetCookiePair(tempLogin2);
+
+  const chgRes = await fetch(`${ctx.baseUrl}/api/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: tempCookie2 },
+    body: JSON.stringify({ currentPassword: 'temp-pass-9876', newPassword: 'brand-new-pass-456' }),
+  });
+  assert.equal(chgRes.status, 200);
+  assert.equal((await (await fetch(`${ctx.baseUrl}/api/auth/me`, { headers: { Cookie: tempCookie2 } })).json()).user, null);
+
+  const finalLogin = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'temp_tester', password: 'brand-new-pass-456' }),
+  });
+  const finalCookie = extractSetCookiePair(finalLogin);
+  assert.equal((await finalLogin.json()).user.mustChangePassword, false);
+
+  // 2. 時刻注入でちょうど7日後に失効し、無効Cookie付きPOSTは黙って匿名化せず 401 SESSION_EXPIRED を返す
+  fakeNowMs += 7 * 24 * 60 * 60 * 1000;
+  const expiredPost = await fetch(`${ctx.baseUrl}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: finalCookie },
+    body: JSON.stringify({ thread_id: 1, content: '失効後に匿名化されては困る投稿' }),
+  });
+  assert.equal(expiredPost.status, 401);
+  assert.equal((await expiredPost.json()).code, 'SESSION_EXPIRED');
+  assert.ok(expiredPost.headers.get('set-cookie').includes('Max-Age=0'));
+
+  // 3. ALLOW_SIGNUP=false 時、新規登録は403で止まるがログインや匿名投稿は維持される
+  const closedCtx = await startTestServer({
+    devInsecureCookie: true,
+    allowSignup: false,
+    scryptOptions: { scryptFn: makeFastScryptFn() },
+    authRateLimitMaxPerIp: 2,
+    authMaxBodyBytes: 256,
+  });
+  t.after(() => closedCtx.stop());
+
+  const closedReg = await fetch(`${closedCtx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: closedCtx.baseUrl },
+    body: JSON.stringify({ username: 'newcomer', password: 'password-1234' }),
+  });
+  assert.equal(closedReg.status, 403);
+
+  // 4KB（ここでは256B）超過で 413、IPレート制限超過で 429
+  const bigAuth = await fetch(`${closedCtx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: closedCtx.baseUrl },
+    body: JSON.stringify({ username: 'alice', password: 'x'.repeat(300) }),
+  });
+  assert.equal(bigAuth.status, 413);
+
+  const limitedAuth = await fetch(`${closedCtx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: closedCtx.baseUrl },
+    body: JSON.stringify({ username: 'alice', password: 'password123' }),
+  });
+  assert.equal(limitedAuth.status, 429);
+  // /api/health は影響を受けず 200
+  assert.equal((await fetch(`${closedCtx.baseUrl}/api/health`)).status, 200);
+});
+
+test('HTTPS本番プロキシ模擬: __Host- Cookie・Secure・Origin完全一致・スキーム違い拒否・非HTTPS拒否', async (t) => {
+  const ctx = await startTestServer({
+    trustProxy: true,
+    devInsecureCookie: false,
+    allowedOrigin: 'https://testserver.koo-hi.com',
+    scryptOptions: { scryptFn: makeFastScryptFn() },
+  });
+  t.after(() => ctx.stop());
+
+  // 1. 非HTTPS（X-Forwarded-Proto なし）のままだと Cookie を発行しない
+  const plainProto = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: 'https://testserver.koo-hi.com',
+    },
+    body: JSON.stringify({ username: 'https_user', password: 'secure-password-123' }),
+  });
+  assert.equal(plainProto.status, 403);
+  assert.equal(plainProto.headers.get('set-cookie'), null);
+
+  // 2. Origin 欠落 / Origin: null / スキーム違い / 兄弟サブドメイン / cross-site をすべて 403 拒否
+  const badHeadersList = [
+    { 'Content-Type': 'application/json', 'X-Forwarded-Proto': 'https' }, // Origin欠落
+    { 'Content-Type': 'application/json', 'X-Forwarded-Proto': 'https', Origin: 'null' },
+    { 'Content-Type': 'application/json', 'X-Forwarded-Proto': 'https', Origin: 'http://testserver.koo-hi.com' },
+    { 'Content-Type': 'application/json', 'X-Forwarded-Proto': 'https', Origin: 'https://koo-hi.com' },
+    {
+      'Content-Type': 'application/json',
+      'X-Forwarded-Proto': 'https',
+      Origin: 'https://testserver.koo-hi.com',
+      'Sec-Fetch-Site': 'cross-site',
+    },
+  ];
+  for (const h of badHeadersList) {
+    const r = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: h,
+      body: JSON.stringify({ username: 'https_user', password: 'secure-password-123' }),
+    });
+    assert.equal(r.status, 403);
+  }
+
+  // 3. 正規プロキシヘッダー＋完全一致 Origin で __Host-board_session + Secure 発行
+  const okReg = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Forwarded-Proto': 'https',
+      Origin: 'https://testserver.koo-hi.com',
+    },
+    body: JSON.stringify({ username: 'https_user', password: 'secure-password-123' }),
+  });
+  assert.equal(okReg.status, 201);
+  const rawSetCookie = okReg.headers.get('set-cookie');
+  assert.ok(rawSetCookie.startsWith(`${HTTPS_SESSION_COOKIE_NAME}=`));
+  assert.ok(rawSetCookie.includes('Secure'));
+  assert.ok(rawSetCookie.includes('HttpOnly'));
+  assert.ok(rawSetCookie.includes('SameSite=Lax'));
+  assert.ok(rawSetCookie.includes('Path=/'));
+  assert.equal(/domain=/i.test(rawSetCookie), false);
+});
+
+test('管理CLI認証管理コマンド: 引数パスワード拒否・非TTY拒否・list-users / set-role / revoke-sessions', (t) => {
+  const { spawnSync } = require('node:child_process');
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'basic-board-auth-cli-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const cliDbPath = path.join(tmpRoot, 'auth-cli.db');
+  const db = createBoardDb({ dbPath: cliDbPath });
+  db.createUserWithSession({
+    username: 'cli_alice',
+    passwordHash: `scrypt$v1$16384$8$5$64$${'11'.repeat(16)}$${'22'.repeat(64)}`,
+    tokenHash: 'e'.repeat(64),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    nowIso: '2026-11-19T00:00:00.000Z',
+  });
+  db.close();
+
+  const modScript = path.join(__dirname, '..', 'src', 'moderate.js');
+  const runMod = (cliArgs) =>
+    spawnSync(process.execPath, [modScript, ...cliArgs], {
+      encoding: 'utf8',
+      input: 'piped-secret-password\npiped-secret-password\n',
+      env: { ...process.env, DB_PATH: cliDbPath },
+    });
+
+  // 引数にパスワードを入れた場合は拒否されること
+  const argPw = runMod(['create-user', 'bob', 'secret-password-arg']);
+  assert.equal(argPw.status, 1);
+
+  // 非TTY（パイプ入力）では自動フォールバックせず拒否されること
+  const nonTtyReset = runMod(['reset-password', 'cli_alice']);
+  assert.equal(nonTtyReset.status, 1);
+  assert.match(nonTtyReset.stderr, /TTY/);
+
+  // list-users / set-role / revoke-sessions が正常動作すること（ハッシュ・生トークン非表示）
+  const listOut = runMod(['list-users']);
+  assert.equal(listOut.status, 0);
+  assert.ok(listOut.stdout.includes('cli_alice'));
+  assert.equal(listOut.stdout.includes('scrypt$'), false);
+
+  const roleOut = runMod(['set-role', 'cli_alice', 'admin']);
+  assert.equal(roleOut.status, 0);
+  assert.match(roleOut.stdout, /role=admin/);
+
+  const verifyDb = createBoardDb({ dbPath: cliDbPath });
+  try {
+    const u = verifyDb.getUserForAuthByUsername('cli_alice');
+    assert.equal(u.role, 'admin');
+    // set-role 時点で全セッションが失効されていること
+    assert.equal(verifyDb.getSessionAuthByTokenHash('e'.repeat(64), '2026-11-19T01:00:00.000Z'), null);
+  } finally {
+    verifyDb.close();
+  }
+});
+
+test('HTTP過負荷とDB障害時契約: scryptキュー溢れで503+Retry-After返し/api/healthは200・セッションDB障害時は500で匿名化しない', async (t) => {
+  const fastFn = makeFastScryptFn();
+  let gateEnabled = false;
+  const gates = [];
+
+  const gatedScrypt = async (password, salt, keylen) => {
+    if (gateEnabled) {
+      await new Promise((resolve) => gates.push(resolve));
+    }
+    return fastFn(password, salt, keylen);
+  };
+
+  const queue = createScryptQueue({ maxConcurrency: 1, maxQueue: 1, scryptFn: gatedScrypt });
+  const ctx = await startTestServer({ devInsecureCookie: true, scryptQueue: queue });
+  t.after(async () => {
+    gateEnabled = false;
+    while (gates.length > 0) gates.shift()();
+    await ctx.stop();
+  });
+  const origin = ctx.baseUrl;
+
+  const reg = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'overload_user', password: 'overload-password-123' }),
+  });
+  assert.equal(reg.status, 201);
+  const validCookie = extractSetCookiePair(reg);
+
+  // 1. scryptキュー (active=1, queue=1) を満たしてから3件目を投げると 503 + Retry-After: 2 になる
+  gateEnabled = true;
+  const req1 = fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'overload_user', password: 'overload-password-123' }),
+  });
+  while (gates.length < 1) await new Promise((r) => setTimeout(r, 5));
+
+  const req2 = fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'overload_user', password: 'overload-password-123' }),
+  });
+  while (queue.getStats().waiting < 1) await new Promise((r) => setTimeout(r, 5));
+
+  const res3 = await fetch(`${ctx.baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'overload_user', password: 'overload-password-123' }),
+  });
+  assert.equal(res3.status, 503);
+  assert.equal(res3.headers.get('retry-after'), '2');
+  await res3.text();
+  assert.ok(ctx.server.getAuthMetrics().queueRejected503 >= 1);
+
+  // 認証キューが満杯の間でも /api/health は影響を受けず 200 を返すこと
+  const healthRes = await fetch(`${ctx.baseUrl}/api/health`);
+  assert.equal(healthRes.status, 200);
+  await healthRes.text();
+
+  gateEnabled = false;
+  while (gates.length > 0 || queue.getStats().active > 0 || queue.getStats().waiting > 0) {
+    while (gates.length > 0) gates.shift()();
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  const [r1, r2] = await Promise.all([req1, req2]);
+  assert.equal(r1.status, 200);
+  assert.equal(r2.status, 200);
+  await r1.text();
+  await r2.text();
+
+  // 2. Cookie付き POST /api/posts 時にセッション参照でDB障害が起きた場合は500を返し、黙って匿名投稿しないこと
+  const origGetSession = ctx.db.getSessionAuthByTokenHash;
+  ctx.db.getSessionAuthByTokenHash = () => {
+    throw new Error('SQLITE_BUSY: database is locked');
+  };
+  let dbErrRes;
+  try {
+    dbErrRes = await fetch(`${ctx.baseUrl}/api/posts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: validCookie },
+      body: JSON.stringify({ thread_id: 1, content: 'DB障害時に匿名投稿されてはいけない本文' }),
+    });
+  } finally {
+    ctx.db.getSessionAuthByTokenHash = origGetSession;
+  }
+  assert.equal(dbErrRes.status, 500);
+  const detail = ctx.db.getThreadDetail(1);
+  assert.equal(detail.posts.some((p) => p.content === 'DB障害時に匿名投稿されてはいけない本文'), false);
+});
+
+test('レビュー回帰(F2/F3/F4): CLI秘密候補非エコー・非BMP会員名投稿＆編集・本文読取中期限切れ拒否', async (t) => {
+  const http = require('node:http');
+  const { spawnSync } = require('node:child_process');
+
+  // 1. F2: create-user / reset-password でパスワード候補を誤って引数へ渡しても stderr/stdout に再掲しないこと
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'basic-board-f2-cli-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 3 }));
+  const cliDbPath = path.join(tmpDir, 'f2.db');
+  const modScript = path.join(__dirname, '..', 'src', 'moderate.js');
+  const dummySecret = 'REVIEW_SECRET_CANDIDATE_XYZ_999';
+
+  for (const action of ['create-user', 'reset-password']) {
+    const cliRes = spawnSync(process.execPath, [modScript, action, 'f2_target', dummySecret], {
+      encoding: 'utf8',
+      env: { ...process.env, DB_PATH: cliDbPath },
+      windowsHide: true,
+    });
+    assert.equal(cliRes.status, 1);
+    assert.equal((cliRes.stdout + cliRes.stderr).includes(dummySecret), false);
+  }
+
+  // 2. F3 & F4 用サーバー起動
+  let clock = Date.parse('2026-11-19T12:00:00.000Z');
+  const ctx = await startTestServer({
+    devInsecureCookie: true,
+    scryptOptions: { scryptFn: makeFastScryptFn() },
+    nowFn: () => new Date(clock),
+    sessionTtlSeconds: 1,
+  });
+  t.after(async () => {
+    ctx.server.closeAllConnections?.();
+    await ctx.stop();
+  });
+  const origin = ctx.baseUrl;
+
+  // F3: 非BMP Unicode（😀×16 = 16コードポイント / UTF-16で32単位）で登録・会員投稿・過剰author_name無視・本文編集・匿名30超拒否
+  const emoji16 = '😀'.repeat(16);
+  const regEmoji = await fetch(`${origin}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: emoji16, password: 'emoji-password-123' }),
+  });
+  assert.equal(regEmoji.status, 201);
+  const emojiCookie = extractSetCookiePair(regEmoji);
+
+  const memberEmojiPost = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: emojiCookie },
+    body: JSON.stringify({ thread_id: 1, author_name: emoji16, content: '非BMP会員投稿' }),
+  });
+  assert.equal(memberEmojiPost.status, 201);
+  const createdEmoji = (await memberEmojiPost.json()).post;
+  assert.equal(createdEmoji.is_member, true);
+  assert.equal(createdEmoji.author_name, emoji16);
+
+  // クライアント側が異常に長い author_name を送っても会員投稿はサーバー確定名で通ること
+  const bogusMemberPost = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: emojiCookie },
+    body: JSON.stringify({ thread_id: 1, author_name: 'z'.repeat(120), content: '会員名無視テスト' }),
+  });
+  assert.equal(bogusMemberPost.status, 201);
+  assert.equal((await bogusMemberPost.json()).post.author_name, emoji16);
+
+  // 管理編集で会員本文更新は通る（author_nameはコードポイント一致）
+  const editedEmoji = ctx.db.updatePost({ postId: createdEmoji.id, content: '非BMP会員投稿(編集済)' });
+  assert.equal(editedEmoji.post.content, '非BMP会員投稿(編集済)');
+
+  // 匿名投稿でも16コードポイントは通り、31コードポイントは400で拒否される
+  const anonOk = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ thread_id: 1, author_name: emoji16, content: '非BMP匿名16' }),
+  });
+  assert.equal(anonOk.status, 201);
+  const anonTooLong = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ thread_id: 1, author_name: '😀'.repeat(31), content: '非BMP匿名31' }),
+  });
+  assert.equal(anonTooLong.status, 400);
+
+  // 3. F4: 分割送信の本文読取中にセッション有効期限を過ぎた場合は 401 で拒否すること（投稿 / パスワード変更）
+  const regExp = await fetch(`${origin}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'f4_expiry_user', password: 'expiry-password-123' }),
+  });
+  assert.equal(regExp.status, 201);
+  const expCookie = extractSetCookiePair(regExp);
+
+  const sendSplitDuringClockJump = (route, cookie, firstChunk, secondChunk, advanceMs) =>
+    new Promise((resolve, reject) => {
+      const reqPromise = new Promise((resReq) => ctx.server.once('request', resReq));
+      const req = http.request(
+        `${origin}${route}`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: origin,
+            Cookie: cookie,
+            Connection: 'close',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (part) => {
+            body += part;
+          });
+          res.on('end', () => {
+            resolve({ status: res.statusCode, body: JSON.parse(body) });
+          });
+        }
+      );
+      req.on('error', reject);
+      req.write(firstChunk);
+      reqPromise
+        .then(() => new Promise((r) => setTimeout(r, 10)))
+        .then(() => {
+          clock += advanceMs;
+          req.end(secondChunk);
+        })
+        .catch(reject);
+    });
+
+  const expiredPostRes = await sendSplitDuringClockJump(
+    '/api/posts',
+    expCookie,
+    '{"thread_id":1,',
+    '"content":"読取中期限切れ本文"}',
+    2000
+  );
+  assert.equal(expiredPostRes.status, 401);
+  assert.equal(expiredPostRes.body.code, 'SESSION_EXPIRED');
+  assert.equal(ctx.db.getThreadDetail(1).posts.some((p) => p.content === '読取中期限切れ本文'), false);
+
+  // パスワード変更エンドポイントも同様に読取中の期限切れを通さないこと
+  const loginPw = await fetch(`${origin}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'f4_expiry_user', password: 'expiry-password-123' }),
+  });
+  assert.equal(loginPw.status, 200);
+  const expCookie2 = extractSetCookiePair(loginPw);
+
+  const expiredPwRes = await sendSplitDuringClockJump(
+    '/api/auth/password',
+    expCookie2,
+    '{"currentPassword":"expiry-password-123",',
+    '"newPassword":"should-not-apply-456"}',
+    2000
+  );
+  assert.equal(expiredPwRes.status, 401);
 });

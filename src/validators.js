@@ -33,8 +33,17 @@ class ValidationError extends Error {
 // ---------------------------------------------------------------------
 const DISALLOWED_CONTROL_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 const AUTHOR_DISALLOWED_RE = /[\x00-\x1F\x7F]/;
+const ZERO_WIDTH_RE = /[\u200B-\u200D\u2060\uFEFF]/;
 const INVISIBLE_STRIP_RE = /[\s\u3000\u200B-\u200D\u2060\uFEFF]+/g;
 const EDGE_WHITESPACE_RE = /^[\s\u3000\u200B-\u200D\u2060\uFEFF]+|[\s\u3000\u200B-\u200D\u2060\uFEFF]+$/g;
+
+function countCodePoints(str) {
+  return Array.from(str).length;
+}
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 // ---------------------------------------------------------------------
 // 3. 正の整数（1以上）の厳格パース関数
@@ -66,7 +75,7 @@ function parsePositiveInt(value, fieldLabel = 'ID') {
 // - author_name: 任意・空欄時は「名無しさん」を補完、最大30文字
 // - content   : 必須・空白/改行のみ不可、最大2000文字
 // ---------------------------------------------------------------------
-function validatePostInput(body) {
+function validatePostInput(body, { ignoreAuthorName = false } = {}) {
   // ペイロード自体がオブジェクトかどうかのガード節（nullや配列を拒否）
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     throw new ValidationError('リクエスト形式が不正です（JSONオブジェクトが必要です）。', 400);
@@ -81,9 +90,9 @@ function validatePostInput(body) {
     parentId = parsePositiveInt(body.parent_id, '返信先ID');
   }
 
-  // 投稿者名の検証と既定値補完
+  // 投稿者名の検証と既定値補完（会員投稿時はクライアント値を無視してサーバー側アカウント名を用いる）
   let authorName = '名無しさん';
-  if (body.author_name !== undefined && body.author_name !== null) {
+  if (!ignoreAuthorName && body.author_name !== undefined && body.author_name !== null) {
     if (typeof body.author_name !== 'string') {
       throw new ValidationError('投稿者名は文字列で指定してください。', 400);
     }
@@ -91,10 +100,11 @@ function validatePostInput(body) {
       throw new ValidationError('投稿者名に使用できない制御文字または改行が含まれています。', 400);
     }
     const trimmedName = body.author_name.replace(EDGE_WHITESPACE_RE, '');
-    if (trimmedName.length > 30) {
+    const authorLen = countCodePoints(trimmedName);
+    if (authorLen > 30) {
       throw new ValidationError('投稿者名は30文字以内で入力してください。', 400);
     }
-    if (trimmedName.length >= 1) {
+    if (authorLen >= 1) {
       authorName = trimmedName;
     }
   }
@@ -223,8 +233,117 @@ function extractClientIp(req, { trustProxy = false } = {}) {
   return socketIp;
 }
 
+// ---------------------------------------------------------------------
+// 10. 認証入力の検証（ユーザー名・パスワード・ロール）
+// - SQLite の length() と一致するよう Unicode コードポイント数で検査する。
+// - パスワードは黙った前後トリムや切り詰め、Unicode正規化を行わない。
+// ---------------------------------------------------------------------
+const MIN_USERNAME_LENGTH = 3;
+const MAX_USERNAME_LENGTH = 30;
+const MIN_PASSWORD_LENGTH = 8;
+const MAX_PASSWORD_LENGTH = 128;
+
+function validateUsername(rawUsername) {
+  if (typeof rawUsername !== 'string') {
+    throw new ValidationError('ユーザー名は文字列で入力してください。', 400);
+  }
+  if (AUTHOR_DISALLOWED_RE.test(rawUsername) || ZERO_WIDTH_RE.test(rawUsername)) {
+    throw new ValidationError('ユーザー名に使用できない制御文字・改行・不可視文字が含まれています。', 400);
+  }
+  const trimmed = rawUsername.replace(EDGE_WHITESPACE_RE, '');
+  const len = countCodePoints(trimmed);
+  if (len < MIN_USERNAME_LENGTH || len > MAX_USERNAME_LENGTH) {
+    throw new ValidationError(
+      `ユーザー名は${MIN_USERNAME_LENGTH}〜${MAX_USERNAME_LENGTH}文字で入力してください。`,
+      400
+    );
+  }
+  return trimmed;
+}
+
+function validatePassword(rawPassword, { minLength = MIN_PASSWORD_LENGTH, maxLength = MAX_PASSWORD_LENGTH, label = 'パスワード' } = {}) {
+  if (typeof rawPassword !== 'string') {
+    throw new ValidationError(`${label}は文字列で入力してください。`, 400);
+  }
+  if (AUTHOR_DISALLOWED_RE.test(rawPassword)) {
+    throw new ValidationError(`${label}に使用できない制御文字または改行が含まれています。`, 400);
+  }
+  // 空白文字や不可視文字のみのパスワードは拒否（ただし先頭・末尾の空白自体は黙って削除しない）
+  if (rawPassword.replace(INVISIBLE_STRIP_RE, '').length === 0) {
+    throw new ValidationError(`${label}に空白のみの値は指定できません。`, 400);
+  }
+  const len = countCodePoints(rawPassword);
+  if (len < minLength || len > maxLength) {
+    throw new ValidationError(
+      `${label}は${minLength}〜${maxLength}文字で入力してください。`,
+      400
+    );
+  }
+  return rawPassword;
+}
+
+function validateUserRole(rawRole) {
+  if (rawRole !== 'user' && rawRole !== 'admin') {
+    throw new ValidationError("権限ロールは 'user' または 'admin' を指定してください。", 400);
+  }
+  return rawRole;
+}
+
+function validateAuthRegisterInput(body) {
+  if (!isPlainObject(body)) {
+    throw new ValidationError('リクエスト形式が不正です（JSONオブジェクトが必要です）。', 400);
+  }
+  // role や created_by 等の余分なクライアント入力は無視し、常に 'user' 固定で扱う
+  return {
+    username: validateUsername(body.username),
+    password: validatePassword(body.password, {
+      minLength: MIN_PASSWORD_LENGTH,
+      maxLength: MAX_PASSWORD_LENGTH,
+      label: 'パスワード',
+    }),
+  };
+}
+
+function validateAuthLoginInput(body) {
+  if (!isPlainObject(body)) {
+    throw new ValidationError('リクエスト形式が不正です（JSONオブジェクトが必要です）。', 400);
+  }
+  return {
+    username: validateUsername(body.username),
+    // 将来の最低文字数引き上げ時にも既存利用者がログインできるよう minLength=1 で受け付ける
+    password: validatePassword(body.password, {
+      minLength: 1,
+      maxLength: MAX_PASSWORD_LENGTH,
+      label: 'パスワード',
+    }),
+  };
+}
+
+function validateChangePasswordInput(body) {
+  if (!isPlainObject(body)) {
+    throw new ValidationError('リクエスト形式が不正です（JSONオブジェクトが必要です）。', 400);
+  }
+  return {
+    currentPassword: validatePassword(body.currentPassword, {
+      minLength: 1,
+      maxLength: MAX_PASSWORD_LENGTH,
+      label: '現在のパスワード',
+    }),
+    newPassword: validatePassword(body.newPassword, {
+      minLength: MIN_PASSWORD_LENGTH,
+      maxLength: MAX_PASSWORD_LENGTH,
+      label: '新しいパスワード',
+    }),
+  };
+}
+
 module.exports = {
   ValidationError,
+  MIN_USERNAME_LENGTH,
+  MAX_USERNAME_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  MAX_PASSWORD_LENGTH,
+  countCodePoints,
   parsePositiveInt,
   validatePostInput,
   validateIdSecret,
@@ -232,4 +351,10 @@ module.exports = {
   normalizeIp,
   generateVisitorId,
   extractClientIp,
+  validateUsername,
+  validatePassword,
+  validateUserRole,
+  validateAuthRegisterInput,
+  validateAuthLoginInput,
+  validateChangePasswordInput,
 };
