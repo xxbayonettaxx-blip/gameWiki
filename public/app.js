@@ -189,13 +189,45 @@
   }
 
   // -------------------------------------------------------------------
-  // 3. 上からスライド展開する「表示設定シート」の開閉（F4: inert・即時focus対応）
+  // 3. 上からスライド展開する「表示設定シート」＆ モーダル/非モーダル境界制御（R5）
   // -------------------------------------------------------------------
+  const DESKTOP_MEDIA = window.matchMedia('(min-width: 760px)');
+  const BACKGROUND_SELECTORS = ['.skip-link', 'header.masthead', '.site-shell', '#fab-write'];
+
+  function syncOverlayAccessibility() {
+    const isDesktop = DESKTOP_MEDIA.matches;
+    const composerIsModal = state.composerOpen && !isDesktop;
+    const hasModal = state.authOpen || state.settingsOpen || composerIsModal;
+
+    const drawer = $('#composer-drawer');
+    const composerBackdrop = $('#composer-backdrop');
+    if (drawer) {
+      drawer.setAttribute('aria-modal', String(composerIsModal));
+      const drawerHidden = !state.composerOpen || state.authOpen || state.settingsOpen;
+      drawer.inert = drawerHidden;
+      drawer.setAttribute('aria-hidden', String(drawerHidden));
+    }
+    if (composerBackdrop) {
+      composerBackdrop.hidden = !composerIsModal;
+    }
+
+    for (const sel of BACKGROUND_SELECTORS) {
+      const node = $(sel);
+      if (!node) continue;
+      node.inert = hasModal;
+      if (hasModal) {
+        node.setAttribute('aria-hidden', 'true');
+      } else {
+        node.removeAttribute('aria-hidden');
+      }
+    }
+  }
+
   function openSettings() {
     if (state.authOpen) {
       closeAuthSheet({ restoreFocus: false });
     }
-    if (state.composerOpen && window.innerWidth < 760) {
+    if (state.composerOpen && !DESKTOP_MEDIA.matches) {
       closeComposer({ restoreFocus: false });
     }
     state.settingsOpen = true;
@@ -208,6 +240,7 @@
     sheet.setAttribute('aria-hidden', 'false');
     sheet.classList.add('is-open');
     trigger.setAttribute('aria-expanded', 'true');
+    syncOverlayAccessibility();
     // visibility: visible を即座にレイアウト確定させてからフォーカスを当てる
     void sheet.offsetWidth;
     $('#settings-close').focus({ preventScroll: true });
@@ -225,6 +258,7 @@
     sheet.inert = true;
     backdrop.hidden = true;
     trigger.setAttribute('aria-expanded', 'false');
+    syncOverlayAccessibility();
     if (restoreFocus) trigger.focus({ preventScroll: true });
   }
 
@@ -266,14 +300,19 @@
     const triggerLabel = $('#auth-open-label');
     if (trigger && triggerLabel) {
       trigger.classList.toggle('is-logged-in', Boolean(state.user));
+      trigger.classList.toggle('is-must-change', Boolean(state.user?.mustChangePassword));
       if (state.user) {
         triggerLabel.textContent = state.user.mustChangePassword
           ? `${state.user.username}(要変更)`
           : state.user.username;
         trigger.setAttribute('aria-label', `アカウントメニュー (${state.user.username})`);
+        trigger.title = state.user.mustChangePassword
+          ? `${state.user.username}（パスワード変更が必要）`
+          : state.user.username;
       } else {
         triggerLabel.textContent = 'ログイン';
         trigger.setAttribute('aria-label', 'アカウント・ログインを開く');
+        trigger.title = 'ログイン・新規登録';
       }
     }
 
@@ -298,8 +337,16 @@
       if (titleEl) titleEl.textContent = 'ログイン・新規登録';
 
       const isLogin = state.authTab !== 'register';
-      $('#auth-tab-login').setAttribute('aria-selected', String(isLogin));
-      $('#auth-tab-register').setAttribute('aria-selected', String(!isLogin));
+      const loginTab = $('#auth-tab-login');
+      const registerTab = $('#auth-tab-register');
+      if (loginTab) {
+        loginTab.setAttribute('aria-selected', String(isLogin));
+        loginTab.tabIndex = isLogin ? 0 : -1;
+      }
+      if (registerTab) {
+        registerTab.setAttribute('aria-selected', String(!isLogin));
+        registerTab.tabIndex = isLogin ? -1 : 0;
+      }
       $('#login-form').hidden = !isLogin;
       $('#register-form').hidden = isLogin;
     }
@@ -350,11 +397,25 @@
     }
   }
 
+  function selectAuthTab(tabName, { focusTab = false, focusInput = false } = {}) {
+    state.authTab = tabName === 'register' ? 'register' : 'login';
+    clearAuthPasswords();
+    clearAuthErrors();
+    syncAuthUI();
+    if (focusTab) {
+      const targetTab = state.authTab === 'register' ? $('#auth-tab-register') : $('#auth-tab-login');
+      targetTab?.focus({ preventScroll: true });
+    } else if (focusInput) {
+      const targetInput = state.authTab === 'register' ? $('#register-username') : $('#login-username');
+      targetInput?.focus({ preventScroll: true });
+    }
+  }
+
   function openAuthSheet({ tab = null, reopenComposer = false } = {}) {
     if (state.settingsOpen) {
       closeSettings({ restoreFocus: false });
     }
-    if (state.composerOpen && window.innerWidth < 760) {
+    if (state.composerOpen && !DESKTOP_MEDIA.matches) {
       closeComposer({ restoreFocus: false });
     }
     state.reopenComposerAfterAuth = Boolean(reopenComposer);
@@ -373,6 +434,7 @@
     sheet.setAttribute('aria-hidden', 'false');
     sheet.classList.add('is-open');
     trigger.setAttribute('aria-expanded', 'true');
+    syncOverlayAccessibility();
     void sheet.offsetWidth;
     focusFirstAuthField();
   }
@@ -392,6 +454,7 @@
     sheet.inert = true;
     backdrop.hidden = true;
     trigger.setAttribute('aria-expanded', 'false');
+    syncOverlayAccessibility();
     if (restoreFocus) trigger.focus({ preventScroll: true });
   }
 
@@ -564,19 +627,16 @@
     syncComposerHeader();
 
     const drawer = $('#composer-drawer');
-    const backdrop = $('#composer-backdrop');
-    backdrop.hidden = false;
-    drawer.inert = false;
-    drawer.setAttribute('aria-hidden', 'false');
     drawer.classList.add('is-open');
     document.body.classList.add('composer-open');
+    syncOverlayAccessibility();
 
     if (replyPost) {
       const postEl = document.getElementById(`post-${replyPost.id}`);
       if (postEl) {
         postEl.scrollIntoView({
           behavior: scrollBehavior(),
-          block: window.innerWidth < 760 ? 'end' : 'center',
+          block: !DESKTOP_MEDIA.matches ? 'end' : 'center',
         });
       }
     }
@@ -596,12 +656,9 @@
     if (clearReply) state.replyTarget = null;
 
     const drawer = $('#composer-drawer');
-    const backdrop = $('#composer-backdrop');
     drawer.classList.remove('is-open');
-    drawer.setAttribute('aria-hidden', 'true');
-    drawer.inert = true;
-    backdrop.hidden = true;
     document.body.classList.remove('composer-open');
+    syncOverlayAccessibility();
     syncReplyingTargetHighlight();
 
     if (restoreFocus) {
@@ -1077,7 +1134,7 @@
 
       if (switchedThread) {
         restoreThreadDraft();
-        if (window.innerWidth < 760) {
+        if (!DESKTOP_MEDIA.matches) {
           closeComposer({ restoreFocus: false });
         }
       }
@@ -1393,19 +1450,27 @@
     $('#auth-backdrop').addEventListener('click', () => closeAuthSheet());
 
     $('#auth-tab-login').addEventListener('click', () => {
-      state.authTab = 'login';
-      clearAuthPasswords();
-      clearAuthErrors();
-      syncAuthUI();
-      $('#login-username').focus({ preventScroll: true });
+      selectAuthTab('login', { focusInput: true });
     });
     $('#auth-tab-register').addEventListener('click', () => {
-      state.authTab = 'register';
-      clearAuthPasswords();
-      clearAuthErrors();
-      syncAuthUI();
-      $('#register-username').focus({ preventScroll: true });
+      selectAuthTab('register', { focusInput: true });
     });
+    // R4：WAI-ARIA Tabs 仕様準拠（左右矢印・Home・End でタブ間移動＋選択同期）
+    $('.auth-tabs')?.addEventListener('keydown', (e) => {
+      if (state.user) return;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const nextTab = state.authTab === 'register' ? 'login' : 'register';
+        selectAuthTab(nextTab, { focusTab: true });
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        selectAuthTab('login', { focusTab: true });
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        selectAuthTab('register', { focusTab: true });
+      }
+    });
+    DESKTOP_MEDIA.addEventListener('change', syncOverlayAccessibility);
 
     $('#login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1589,6 +1654,7 @@
       try {
         if (logoutSucceeded) {
           state.user = null;
+          state.authTab = 'login';
           state.pendingSessionExpired = false;
           syncAuthUI();
           closeAuthSheet();
@@ -1599,6 +1665,7 @@
         const probed = await probeCurrentUser();
         if (probed.ok && probed.user === null) {
           state.user = null;
+          state.authTab = 'login';
           state.pendingSessionExpired = false;
           syncAuthUI();
           closeAuthSheet();
@@ -1684,11 +1751,12 @@
       }
 
       if (e.key === 'Tab') {
+        // R5：PC時の投稿ドロワーは非モーダルのためTab循環せず背景へ移動可能にする
         const activePanel = state.authOpen
           ? $('#auth-sheet')
           : state.settingsOpen
             ? $('#settings-sheet')
-            : state.composerOpen
+            : state.composerOpen && !DESKTOP_MEDIA.matches
               ? $('#composer-drawer')
               : null;
         if (!activePanel) return;

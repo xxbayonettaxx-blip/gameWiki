@@ -19,7 +19,7 @@
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 44 44">
             <path d="M22 4 41 37H31L22 21 13 37H3Z" fill="currentColor"/>
-            <path d="m17 32 5-9 5 9Z" fill="#aba4ee"/>
+            <path class="brand-mark-accent" d="m17 32 5-9 5 9Z"/>
           </svg>
         </span>
         <span>
@@ -68,6 +68,8 @@
   <section
     id="auth-sheet"
     class="settings-sheet auth-sheet"
+    role="dialog"
+    aria-modal="true"
     aria-labelledby="auth-sheet-title"
     aria-hidden="true"
     inert
@@ -84,10 +86,10 @@
       <!-- 未ログイン時パネル（ログイン / 新規登録タブ） -->
       <div id="auth-guest-panel">
         <div class="auth-tabs" role="tablist" aria-label="認証操作の切り替え">
-          <button type="button" id="auth-tab-login" class="auth-tab" role="tab" aria-selected="true" aria-controls="login-form">
+          <button type="button" id="auth-tab-login" class="auth-tab" role="tab" tabindex="0" aria-selected="true" aria-controls="login-form">
             ログイン
           </button>
-          <button type="button" id="auth-tab-register" class="auth-tab" role="tab" aria-selected="false" aria-controls="register-form">
+          <button type="button" id="auth-tab-register" class="auth-tab" role="tab" tabindex="-1" aria-selected="false" aria-controls="register-form">
             新規登録
           </button>
         </div>
@@ -255,6 +257,8 @@
   <section
     id="settings-sheet"
     class="settings-sheet"
+    role="dialog"
+    aria-modal="true"
     aria-labelledby="settings-title"
     aria-hidden="true"
     inert
@@ -430,6 +434,8 @@
   <aside
     id="composer-drawer"
     class="composer-drawer"
+    role="dialog"
+    aria-modal="false"
     aria-labelledby="composer-mode-badge"
     aria-hidden="true"
     inert

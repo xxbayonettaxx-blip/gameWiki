@@ -241,9 +241,12 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.ok(metrics.scrollWidth <= metrics.width, JSON.stringify(metrics));
     assert.ok(metrics.scrollHeight > metrics.height, JSON.stringify(metrics));
     assert.ok(metrics.top >= metrics.drawerTop && metrics.bottom <= metrics.drawerBottom, JSON.stringify(metrics));
+    await click('#composer-close');
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
     await switchThread(2, '質問、初心者質問');
     await click('#write-comment');
     assert.equal(await evaluate("document.querySelector('#comment-body').value"), '同じ本文でも別の下書き');
+    await click('#composer-close');
     await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 480, deviceScaleFactor: 1, mobile: true });
   });
 
@@ -264,28 +267,38 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.equal(sidebarStyle.position, 'sticky');
   });
 
-  await t.test('✕ボタンおよび外側（バックドロップ）クリックで入力欄が隠れること', async () => {
-    // 1. 新規投稿を開く
+  await t.test('✕ボタンおよび外側（バックドロップ）・Escキーで入力欄が隠れること', async () => {
+    // 1. PC幅（1024px）では非モーダル（aria-modal="false"・バックドロップ非表示・背景操作可）で開く
     await click('#write-comment');
     await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
-    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), true);
-    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), false);
+    assert.equal(await evaluate("document.querySelector('#composer-drawer').getAttribute('aria-modal')"), 'false');
+    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), true);
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), false);
 
-    // 2. ✕ボタン（#composer-close）を押すと閉じる
+    // 2. ✕ボタン（#composer-close）を押すと閉じ、元のボタンへフォーカスが戻る
     await click('#composer-close');
     await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
-    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), false);
-    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), true);
+    assert.equal(await evaluate("document.activeElement?.id"), 'write-comment');
 
-    // 3. 再び開き、外側（#composer-backdrop）をクリックすると閉じる
+    // 3. PC幅では Esc キーでも閉じられること
     await click('#write-comment');
     await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
-    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), true);
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+
+    // 4. モバイル幅（390px）ではモーダル（aria-modal="true"・背景inert）になり、外側クリックで閉じる
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#composer-drawer').getAttribute('aria-modal')"), 'true');
+    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), false);
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), true);
 
     await click('#composer-backdrop');
     await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
-    assert.equal(await evaluate("document.querySelector('#composer-drawer').classList.contains('is-open')"), false);
     assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), true);
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), false);
+    await send('Emulation.setDeviceMetricsOverride', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
   });
 
   await t.test('24時間以内の新着スレッドにNEWバッジが表示され、サイドバーに説明があること', async () => {
@@ -600,6 +613,249 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       scrollW: document.documentElement.scrollWidth,
     })`);
     assert.ok(mobilePrivacy.scrollW <= mobilePrivacy.clientW, JSON.stringify(mobilePrivacy));
+  });
+
+  await t.test('Phase 2(R1〜R7): 320/390pxヘッダー・5テーマコントラスト・認証タブ矢印・モーダル/非モーダル・減モーション', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: url + '?phase2Init=1#thread-1' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+    await evaluate(`localStorage.removeItem('community-board-prefs-v1'); document.documentElement.dataset.theme = 'light';`);
+
+    // R1: 320px / 390px とも匿名・長い会員名・要変更表示で横はみ出しゼロ＆両ボタンが画面内に収まること
+    async function assertHeaderFits(label) {
+      for (const vp of [
+        { width: 320, height: 480, deviceScaleFactor: 1, mobile: true },
+        { width: 390, height: 844, deviceScaleFactor: 1, mobile: true },
+      ]) {
+        await send('Emulation.setDeviceMetricsOverride', vp);
+        const m = await evaluate(`(() => {
+          const auth = document.querySelector('#auth-open').getBoundingClientRect();
+          const settings = document.querySelector('#settings-open').getBoundingClientRect();
+          return {
+            clientW: document.documentElement.clientWidth,
+            scrollW: document.documentElement.scrollWidth,
+            authLeft: auth.left,
+            authRight: auth.right,
+            authWidth: auth.width,
+            settingsLeft: settings.left,
+            settingsRight: settings.right,
+            settingsWidth: settings.width,
+          };
+        })()`);
+        assert.ok(m.scrollW <= m.clientW, `${label} ${vp.width}px scroll: ${JSON.stringify(m)}`);
+        assert.ok(m.authLeft >= 0 && m.authRight <= m.clientW, `${label} ${vp.width}px auth bounds: ${JSON.stringify(m)}`);
+        assert.ok(m.settingsRight <= m.clientW && m.settingsWidth >= 40, `${label} ${vp.width}px settings hidden: ${JSON.stringify(m)}`);
+        assert.ok(m.authRight <= m.settingsLeft + 0.5, `${label} ${vp.width}px overlap: ${JSON.stringify(m)}`);
+      }
+    }
+
+    await assertHeaderFits('guest');
+
+    // 長い20文字会員名を登録して 320px/390px を計測
+    const longMember = '長い表示テスト用会員名です1234567';
+    assert.equal(Array.from(longMember).length, 20);
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-tab-register');
+    await setField('#register-username', longMember);
+    await setField('#register-password', 'long-member-pass-1234');
+    await setField('#register-password-confirm', 'long-member-pass-1234');
+    await evaluate("document.querySelector('#register-form').requestSubmit()");
+    await waitFor(`document.querySelector('#auth-open-label')?.textContent === ${JSON.stringify(longMember)} && !document.querySelector('#auth-sheet').classList.contains('is-open')`);
+    await assertHeaderFits('longMember');
+
+    // 仮パスワード(要変更)表示で 320px/390px を計測
+    const tempHash = await createScryptQueue().hashPassword('temp-phase2-1234');
+    db.resetPasswordByUsername({ username: longMember, newPasswordHash: tempHash });
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', longMember);
+    await setField('#login-password', 'temp-phase2-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor(`document.querySelector('#auth-open-label')?.textContent.includes('(要変更)')`);
+    await click('#auth-close');
+    await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await assertHeaderFits('mustChange');
+
+    // テスト終了後の未ログイン状態を復元
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+    // R4 & R5: 認証モーダルの役割・背景inert・タブ矢印キー・Esc復帰
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    const authModalState = await evaluate(`({
+      role: document.querySelector('#auth-sheet').getAttribute('role'),
+      modal: document.querySelector('#auth-sheet').getAttribute('aria-modal'),
+      shellInert: Boolean(document.querySelector('.site-shell').inert),
+      headerInert: Boolean(document.querySelector('header.masthead').inert),
+      loginTabIdx: document.querySelector('#auth-tab-login').tabIndex,
+      regTabIdx: document.querySelector('#auth-tab-register').tabIndex,
+    })`);
+    assert.deepEqual(authModalState, {
+      role: 'dialog',
+      modal: 'true',
+      shellInert: true,
+      headerInert: true,
+      loginTabIdx: 0,
+      regTabIdx: -1,
+    });
+
+    await evaluate("document.querySelector('#auth-tab-login').focus()");
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 });
+    await waitFor("document.querySelector('#auth-tab-register').getAttribute('aria-selected') === 'true'");
+    const arrowRightState = await evaluate(`({
+      activeId: document.activeElement?.id,
+      loginIdx: document.querySelector('#auth-tab-login').tabIndex,
+      regIdx: document.querySelector('#auth-tab-register').tabIndex,
+      regFormHidden: document.querySelector('#register-form').hidden,
+    })`);
+    assert.deepEqual(arrowRightState, {
+      activeId: 'auth-tab-register',
+      loginIdx: -1,
+      regIdx: 0,
+      regFormHidden: false,
+    });
+
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 });
+    await waitFor("document.querySelector('#auth-tab-login').getAttribute('aria-selected') === 'true'");
+    assert.equal(await evaluate("document.activeElement?.id"), 'auth-tab-login');
+
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), false);
+    assert.equal(await evaluate("document.activeElement?.id"), 'auth-open');
+
+    // R5: 表示設定モーダルの役割・背景inert・Esc復帰
+    await click('#settings-open');
+    await waitFor("document.querySelector('#settings-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#settings-sheet').getAttribute('role')"), 'dialog');
+    assert.equal(await evaluate("document.querySelector('#settings-sheet').getAttribute('aria-modal')"), 'true');
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), true);
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await waitFor("!document.querySelector('#settings-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.activeElement?.id"), 'settings-open');
+
+    // R5: 投稿パネルはPC非モーダル <-> モバイルモーダルへ画面幅追従すること
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#composer-drawer').getAttribute('aria-modal')"), 'false');
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), false);
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await waitFor("document.querySelector('#composer-drawer').getAttribute('aria-modal') === 'true'");
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), true);
+    assert.equal(await evaluate("document.querySelector('#composer-backdrop').hidden"), false);
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await waitFor("document.querySelector('#composer-drawer').getAttribute('aria-modal') === 'false'");
+    assert.equal(await evaluate("Boolean(document.querySelector('.site-shell').inert)"), false);
+
+    // R2/R3/R6: 全5テーマで計算済みコントラスト・入力枠・ヘッダーテーマ追従を実測検証
+    // トランジション途中の色を拾わないよう reduced-motion で即時確定させる
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const themeReport = await evaluate(`(() => {
+      function parseColor(raw) {
+        const s = String(raw || '').trim();
+        if (s.startsWith('#')) {
+          const h = s.slice(1);
+          return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+        }
+        const m = s.match(/rgba?\\(\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+        if (!m) throw new Error('Unparseable color: ' + s);
+        return [Number(m[1]), Number(m[2]), Number(m[3])];
+      }
+      function relLum([r, g, b]) {
+        const f = (c) => {
+          const v = c / 255;
+          return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      }
+      function ratio(c1, c2) {
+        const l1 = relLum(parseColor(c1));
+        const l2 = relLum(parseColor(c2));
+        return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+      }
+
+      const out = {};
+      for (const theme of ['light', 'dark', 'paper', 'ud-light', 'ud-dark']) {
+        document.documentElement.dataset.theme = theme;
+        const rootCs = getComputedStyle(document.documentElement);
+        const newBadge = document.querySelector('.thread-card .new-badge');
+        const activeThread = document.querySelector('.thread-card[aria-pressed="true"]');
+        const activeSmall = activeThread?.querySelector('small');
+        const pinLabel = document.querySelector('.pin-label');
+        const bodyInput = document.querySelector('#comment-body');
+        const drawer = document.querySelector('#composer-drawer');
+        const header = document.querySelector('.masthead');
+
+        const newCs = getComputedStyle(newBadge);
+        const activeCs = getComputedStyle(activeThread);
+        const smallCs = getComputedStyle(activeSmall);
+        const bodyCs = getComputedStyle(bodyInput);
+        const phCs = getComputedStyle(bodyInput, '::placeholder');
+        const drawerCs = getComputedStyle(drawer);
+        const headerCs = getComputedStyle(header);
+
+        out[theme] = {
+          newRatio: ratio(newCs.color, newCs.backgroundColor),
+          smallRatio: ratio(smallCs.color, activeCs.backgroundColor),
+          pinOpacity: pinLabel ? getComputedStyle(pinLabel).opacity : 'missing',
+          placeholderRatio: ratio(phCs.color, bodyCs.backgroundColor),
+          borderRatio: ratio(bodyCs.borderTopColor, drawerCs.backgroundColor),
+          btnHoverRatio: ratio(rootCs.getPropertyValue('--accent-fg'), rootCs.getPropertyValue('--accent-hover')),
+          headerBorderTop: headerCs.borderTopColor,
+        };
+      }
+      document.documentElement.dataset.theme = 'light';
+      return out;
+    })()`);
+    await send('Emulation.setEmulatedMedia', { features: [] });
+
+    for (const [theme, metrics] of Object.entries(themeReport)) {
+      assert.ok(metrics.newRatio >= 4.5, `${theme} newRatio=${metrics.newRatio}`);
+      assert.ok(metrics.smallRatio >= 4.5, `${theme} smallRatio=${metrics.smallRatio}`);
+      assert.equal(metrics.pinOpacity, '1', `${theme} pinOpacity=${metrics.pinOpacity}`);
+      assert.ok(metrics.placeholderRatio >= 4.5, `${theme} placeholderRatio=${metrics.placeholderRatio}`);
+      assert.ok(metrics.borderRatio >= 3.0, `${theme} borderRatio=${metrics.borderRatio}`);
+      assert.ok(metrics.btnHoverRatio >= 4.5, `${theme} btnHoverRatio=${metrics.btnHoverRatio}`);
+    }
+    // R6: paper と ud-light のヘッダー上線が light 固定紫と異なりテーマへ追従していること
+    assert.notEqual(themeReport.paper.headerBorderTop, themeReport.light.headerBorderTop);
+    assert.notEqual(themeReport['ud-light'].headerBorderTop, themeReport.light.headerBorderTop);
+
+    await click('#composer-close');
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+
+    // R7: 通常時は .new-dot アニメーションが有効で、prefers-reduced-motion: reduce 時に停止すること
+    const normalDot = await evaluate(`(() => {
+      const dot = document.querySelector('.new-dot');
+      return dot ? getComputedStyle(dot).animationName : null;
+    })()`);
+    assert.equal(normalDot, 'pulse-dot');
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const reducedDot = await evaluate(`(() => {
+      const dot = document.querySelector('.new-dot');
+      return dot ? getComputedStyle(dot).animationName : null;
+    })()`);
+    assert.equal(reducedDot, 'none');
+    await send('Emulation.setEmulatedMedia', { features: [] });
   });
 
   if (process.env.FRONTEND_ARTIFACT_DIR) {
