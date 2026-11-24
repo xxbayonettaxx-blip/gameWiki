@@ -95,6 +95,7 @@
         </div>
 
         <form id="login-form" class="auth-form" role="tabpanel" aria-labelledby="auth-tab-login">
+          <div id="login-notice" class="auth-info-banner" role="status" aria-live="polite" hidden></div>
           <div class="auth-fields">
             <label class="auth-field" for="login-username">
               <span>ユーザー名</span>
@@ -197,57 +198,64 @@
 
         <div id="must-change-banner" class="must-change-banner" role="alert" hidden>
           <strong>⚠ 仮パスワードの強制変更が必要です</strong>
-          <p>安全のため、新しいパスワードを設定して再ログインするまで投稿はできません（ログアウトは可能です）。</p>
+          <p>安全のため、新しい本番パスワードを設定して再ログインするまで投稿はできません（ログアウトは可能です）。</p>
+          <ol class="must-change-steps">
+            <li>下の欄に「管理者から受け取った仮パスワード」と「新しい本番パスワード」を入力して変更する</li>
+            <li>変更後に自動でログアウトされるため、次のログイン画面で新しいパスワードを入力して再ログインする</li>
+          </ol>
         </div>
 
-        <form id="password-form" class="auth-form">
-          <h3>パスワード変更</h3>
-          <div class="auth-fields">
-            <label class="auth-field" for="current-password">
-              <span>現在のパスワード</span>
-              <input
-                id="current-password"
-                name="currentPassword"
-                type="password"
-                maxlength="256"
-                autocomplete="current-password"
-                aria-describedby="password-error"
-                required
-              >
-            </label>
-            <label class="auth-field" for="new-password">
-              <span>新しいパスワード（8〜128文字）</span>
-              <input
-                id="new-password"
-                name="newPassword"
-                type="password"
-                minlength="8"
-                maxlength="256"
-                autocomplete="new-password"
-                aria-describedby="password-hint password-error"
-                required
-              >
-              <small id="password-hint" class="auth-field-hint">変更完了後は全端末がログアウトされるため、新しいパスワードで再ログインしてください。</small>
-            </label>
-            <label class="auth-field" for="new-password-confirm">
-              <span>新しいパスワード（確認用）</span>
-              <input
-                id="new-password-confirm"
-                name="newPasswordConfirm"
-                type="password"
-                minlength="8"
-                maxlength="256"
-                autocomplete="new-password"
-                aria-describedby="password-error"
-                required
-              >
-            </label>
-          </div>
-          <p id="password-error" class="form-error" role="alert"></p>
-          <div class="auth-actions">
-            <button type="submit" id="password-submit" class="button-primary">パスワードを変更する</button>
-          </div>
-        </form>
+        <details id="password-section" class="password-disclosure">
+          <summary id="password-section-summary" class="password-disclosure-summary">パスワードを変更する</summary>
+          <form id="password-form" class="auth-form">
+            <div class="auth-fields">
+              <label class="auth-field" for="current-password">
+                <span id="current-password-label">現在のパスワード</span>
+                <input
+                  id="current-password"
+                  name="currentPassword"
+                  type="password"
+                  maxlength="256"
+                  autocomplete="current-password"
+                  aria-describedby="current-password-hint password-error"
+                  required
+                >
+                <small id="current-password-hint" class="auth-field-hint" hidden></small>
+              </label>
+              <label class="auth-field" for="new-password">
+                <span id="new-password-label">新しいパスワード（8〜128文字）</span>
+                <input
+                  id="new-password"
+                  name="newPassword"
+                  type="password"
+                  minlength="8"
+                  maxlength="256"
+                  autocomplete="new-password"
+                  aria-describedby="password-hint password-error"
+                  required
+                >
+                <small id="password-hint" class="auth-field-hint">変更完了後は安全のため全端末からログアウトされ、ログイン画面へ切り替わります（ユーザー名は自動引き継ぎ）。</small>
+              </label>
+              <label class="auth-field" for="new-password-confirm">
+                <span>新しいパスワード（確認用）</span>
+                <input
+                  id="new-password-confirm"
+                  name="newPasswordConfirm"
+                  type="password"
+                  minlength="8"
+                  maxlength="256"
+                  autocomplete="new-password"
+                  aria-describedby="password-error"
+                  required
+                >
+              </label>
+            </div>
+            <p id="password-error" class="form-error" role="alert"></p>
+            <div class="auth-actions">
+              <button type="submit" id="password-submit" class="button-primary">パスワードを変更する</button>
+            </div>
+          </form>
+        </details>
       </div>
     </div>
   </section>
@@ -399,8 +407,9 @@
             <label class="sort-label">
               <span class="visually-hidden">親投稿の表示順</span>
               <select id="sort">
+                <option value="new" selected>新しい順</option>
+                <option value="activity">返信が新しい順</option>
                 <option value="old">古い順</option>
-                <option value="new">新しい順</option>
               </select>
             </label>
             <button type="button" class="button-primary button-small" id="write-comment">

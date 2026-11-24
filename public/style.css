@@ -247,6 +247,7 @@ a:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
+summary:focus-visible,
 [tabindex]:focus-visible {
   outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
@@ -603,6 +604,76 @@ svg.icon {
   line-height: 1.5;
   margin-bottom: 12px;
   max-width: 520px;
+}
+.must-change-steps {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.auth-info-banner {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-size: 12px;
+  line-height: 1.5;
+  max-width: 520px;
+}
+.password-disclosure {
+  max-width: 520px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--surface-alt);
+  overflow: hidden;
+}
+.password-disclosure-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+.password-disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+.password-disclosure-summary::after {
+  content: "▾";
+  font-size: 12px;
+  color: var(--muted);
+  transition: transform 0.16s ease;
+}
+.password-disclosure[open] > .password-disclosure-summary::after {
+  transform: rotate(180deg);
+}
+.password-disclosure[open] > .password-disclosure-summary {
+  border-bottom: 1px solid var(--line);
+}
+.password-disclosure.is-required {
+  border-color: var(--danger-line);
+}
+.password-disclosure.is-required > .password-disclosure-summary {
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+  cursor: default;
+}
+.password-disclosure.is-required > .password-disclosure-summary::after {
+  content: "必須";
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--danger-ink);
+  transform: none;
+}
+.password-disclosure .auth-form {
+  padding: 14px;
+  background: var(--surface);
+  max-width: none;
 }
 .composer-alert-actions {
   display: flex;
@@ -1219,6 +1290,7 @@ legend {
 /* ④ 通常投稿ツールバー */
 .comments-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--line);
@@ -1238,6 +1310,8 @@ legend {
 
 .toolbar-actions {
   display: flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   align-items: center;
   gap: 8px;
 }
@@ -1249,6 +1323,7 @@ legend {
   border: 1px solid var(--control-border);
   border-radius: 5px;
   min-height: 36px;
+  max-width: 100%;
   padding: 4px 6px;
 }
 

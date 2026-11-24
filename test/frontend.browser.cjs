@@ -596,7 +596,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     // 5. dark テーマ保存状態で privacy.html を開き、テーマ継承と 1280px/320px で横はみ出しゼロを確認
     await evaluate(`localStorage.setItem('community-board-prefs-v1', JSON.stringify({ theme: 'dark', font: 18, background: true }))`);
     await send('Page.navigate', { url: url + 'privacy.html' });
-    await waitFor("document.querySelector('h1')?.textContent.includes('プライバシーポリシー')");
+    await waitFor("document.readyState === 'complete' && document.querySelector('h1')?.textContent.includes('プライバシーポリシー')");
     const desktopPrivacy = await evaluate(`({
       theme: document.documentElement.dataset.theme,
       font: document.documentElement.dataset.font,
@@ -856,6 +856,212 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     })()`);
     assert.equal(reducedDot, 'none');
     await send('Emulation.setEmulatedMedia', { features: [] });
+  });
+
+  await t.test('Phase 3(T4-1/認証UI改善3点): 3段階ソート永続化・パスワード変更折りたたみ・仮PW認知補助・再ログイン引継ぎ', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+    const selectSort = async (value) => {
+      await evaluate(
+        `(() => { const el = document.querySelector('#sort'); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('change', { bubbles: true })); })()`
+      );
+    };
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(`localStorage.removeItem('community-board-prefs-v1')`);
+
+    // 1. #thread-3 に親投稿2件(P1, P2)と P1 への返信2件(R1, R2)を明示日時付きで作成
+    const p1 = db.createPost({ threadId: 3, authorName: '順序親P1', visitorId: 'SORTP1AAAA', content: 'Phase3ソート親P1' });
+    const p2 = db.createPost({ threadId: 3, authorName: '順序親P2', visitorId: 'SORTP2BBBB', content: 'Phase3ソート親P2' });
+    const r1 = db.createPost({ threadId: 3, parentId: p1.id, authorName: '順序子R1', visitorId: 'SORTR1CCCC', content: 'Phase3ソート返信R1' });
+    const r2 = db.createPost({ threadId: 3, parentId: p1.id, authorName: '順序子R2', visitorId: 'SORTR2DDDD', content: 'Phase3ソート返信R2' });
+    db.execRawForTesting('UPDATE posts SET created_at = ? WHERE id = ?', ['2026-11-24T01:00:00.000Z', p1.id]);
+    db.execRawForTesting('UPDATE posts SET created_at = ? WHERE id = ?', ['2026-11-24T02:00:00.000Z', p2.id]);
+    db.execRawForTesting('UPDATE posts SET created_at = ? WHERE id = ?', ['2026-11-24T03:00:00.000Z', r1.id]);
+    db.execRawForTesting('UPDATE posts SET created_at = ? WHERE id = ?', ['2026-11-24T04:00:00.000Z', r2.id]);
+
+    await send('Page.navigate', { url: url + '?phase3Sort=1#thread-3' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === 'あいさつ・自己紹介'");
+
+    const getRootOrder = () => evaluate(`[...document.querySelectorAll('#comments > article.comment-root')].map((el) => el.id)`);
+    const getP1ReplyOrder = () => evaluate(`[...document.querySelectorAll('#post-${p1.id} .reply-entry')].map((el) => el.id)`);
+
+    // 既定は 'new'（P2 が P1 より先、P1 の返信は時系列 R1 -> R2）
+    assert.equal(await evaluate("document.querySelector('#sort').value"), 'new');
+    let order = await getRootOrder();
+    assert.ok(order.indexOf(`post-${p2.id}`) < order.indexOf(`post-${p1.id}`), JSON.stringify(order));
+    assert.deepEqual(await getP1ReplyOrder(), [`post-${r1.id}`, `post-${r2.id}`]);
+
+    // 'activity' へ変更（最新返信 R2 を持つ P1 が先頭側へ移動）＆ 320px 幅で横はみ出しゼロ
+    await selectSort('activity');
+    order = await getRootOrder();
+    assert.ok(order.indexOf(`post-${p1.id}`) < order.indexOf(`post-${p2.id}`), JSON.stringify(order));
+    assert.deepEqual(await getP1ReplyOrder(), [`post-${r1.id}`, `post-${r2.id}`]);
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 480, deviceScaleFactor: 1, mobile: true });
+    const mobileSortBox = await evaluate('({ w: document.documentElement.clientWidth, s: document.documentElement.scrollWidth })');
+    assert.ok(mobileSortBox.s <= mobileSortBox.w, JSON.stringify(mobileSortBox));
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+    // 'old' へ変更・localStorage 保存・リロード維持確認
+    await selectSort('old');
+    order = await getRootOrder();
+    assert.ok(order.indexOf(`post-${p1.id}`) < order.indexOf(`post-${p2.id}`), JSON.stringify(order));
+    assert.equal(await evaluate("JSON.parse(localStorage.getItem('community-board-prefs-v1')).sort"), 'old');
+
+    await send('Page.navigate', { url: url + '?phase3SortOldReload=1#thread-3' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === 'あいさつ・自己紹介'");
+    assert.equal(await evaluate("document.querySelector('#sort').value"), 'old');
+    order = await getRootOrder();
+    assert.ok(order.indexOf(`post-${p1.id}`) < order.indexOf(`post-${p2.id}`), JSON.stringify(order));
+
+    // 'activity' のリロード永続化も確認後、既定へ戻す
+    await selectSort('activity');
+    await send('Page.navigate', { url: url + '?phase3SortActivityReload=1#thread-3' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === 'あいさつ・自己紹介'");
+    assert.equal(await evaluate("document.querySelector('#sort').value"), 'activity');
+    order = await getRootOrder();
+    assert.ok(order.indexOf(`post-${p1.id}`) < order.indexOf(`post-${p2.id}`), JSON.stringify(order));
+    await evaluate(`localStorage.removeItem('community-board-prefs-v1')`);
+
+    // 2. 通常会員登録 -> #auth-open を開くとパスワード変更は折りたたみ＆#auth-close フォーカス
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-tab-register');
+    await setField('#register-username', 'phase3_member');
+    await setField('#register-password', 'phase3-pass-1234');
+    await setField('#register-password-confirm', 'phase3-pass-1234');
+    await evaluate("document.querySelector('#register-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'phase3_member' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#password-section').open"), false);
+    assert.equal(await evaluate("document.activeElement?.id"), 'auth-close');
+    assert.equal(await evaluate("document.querySelector('#current-password-label').textContent"), '現在のパスワード');
+    assert.equal(await evaluate("document.querySelector('#current-password-hint').hidden"), true);
+
+    // 閉じた <details> 内が Tab 循環に混入せず、summary クリックで開閉できること
+    await evaluate("document.querySelector('#logout-button').focus()");
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    const afterLogoutFocusId = await evaluate("document.activeElement?.id");
+    assert.equal(afterLogoutFocusId, 'password-section-summary');
+    await click('#password-section-summary');
+    assert.equal(await evaluate("document.querySelector('#password-section').open"), true);
+    await click('#password-section-summary');
+    assert.equal(await evaluate("document.querySelector('#password-section').open"), false);
+
+    // 3. 仮パスワードでログイン -> 自動展開・閉じロック・仮パスワード認知補助ラベル/ヒント表示
+    const tempHash = await createScryptQueue().hashPassword('temp-phase3-1234');
+    db.resetPasswordByUsername({ username: 'phase3_member', newPasswordHash: tempHash });
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', 'phase3_member');
+    await setField('#login-password', 'temp-phase3-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("!document.querySelector('#auth-member-panel').hidden && !document.querySelector('#must-change-banner').hidden");
+
+    const mustUi = await evaluate(`({
+      open: document.querySelector('#password-section').open,
+      requiredClass: document.querySelector('#password-section').classList.contains('is-required'),
+      curLabel: document.querySelector('#current-password-label').textContent,
+      curHintHidden: document.querySelector('#current-password-hint').hidden,
+      bannerText: document.querySelector('#must-change-banner').textContent,
+      activeId: document.activeElement?.id,
+    })`);
+    assert.equal(mustUi.open, true);
+    assert.equal(mustUi.requiredClass, true);
+    assert.ok(mustUi.curLabel.includes('仮パスワード'), mustUi.curLabel);
+    assert.equal(mustUi.curHintHidden, false);
+    assert.ok(mustUi.bannerText.includes('再ログイン'), mustUi.bannerText);
+    assert.equal(mustUi.activeId, 'current-password');
+
+    await click('#password-section-summary');
+    assert.equal(await evaluate("document.querySelector('#password-section').open"), true);
+
+    // 4. 新パスワードへ変更 -> ログイン画面切替・完了バナー・ユーザー名引継ぎ・パスワード欄フォーカス・そのまま再ログイン成功
+    await setField('#current-password', 'temp-phase3-1234');
+    await setField('#new-password', 'new-phase3-5678');
+    await setField('#new-password-confirm', 'new-phase3-5678');
+    await evaluate("document.querySelector('#password-form').requestSubmit()");
+    await waitFor("!document.querySelector('#auth-guest-panel').hidden && document.querySelector('#auth-open-label').textContent === 'ログイン'");
+
+    const postChangeUi = await evaluate(`({
+      noticeHidden: document.querySelector('#login-notice').hidden,
+      noticeText: document.querySelector('#login-notice').textContent,
+      usernameVal: document.querySelector('#login-username').value,
+      activeId: document.activeElement?.id,
+    })`);
+    assert.equal(postChangeUi.noticeHidden, false);
+    assert.ok(postChangeUi.noticeText.includes('パスワードを変更しました'), postChangeUi.noticeText);
+    assert.equal(postChangeUi.usernameVal, 'phase3_member');
+    assert.equal(postChangeUi.activeId, 'login-password');
+
+    // 5. 全5テーマで .password-disclosure-summary と .auth-info-banner の文字コントラスト >= 4.5:1 を検証
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const phase3ThemeRatios = await evaluate(`(() => {
+      function parseColor(raw) {
+        const m = String(raw || '').match(/rgba?\\(\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+        if (!m) throw new Error('Unparseable color: ' + raw);
+        return [Number(m[1]), Number(m[2]), Number(m[3])];
+      }
+      function relLum([r, g, b]) {
+        const f = (c) => {
+          const v = c / 255;
+          return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      }
+      function ratio(c1, c2) {
+        const l1 = relLum(parseColor(c1));
+        const l2 = relLum(parseColor(c2));
+        return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+      }
+      const out = {};
+      for (const theme of ['light', 'dark', 'paper', 'ud-light', 'ud-dark']) {
+        document.documentElement.dataset.theme = theme;
+        const notice = document.querySelector('#login-notice');
+        const disclosure = document.querySelector('#password-section');
+        const summary = document.querySelector('#password-section-summary');
+        const nCs = getComputedStyle(notice);
+        const dCs = getComputedStyle(disclosure);
+        const sCs = getComputedStyle(summary);
+        out[theme] = {
+          noticeRatio: ratio(nCs.color, nCs.backgroundColor),
+          summaryRatio: ratio(sCs.color, dCs.backgroundColor),
+        };
+      }
+      document.documentElement.dataset.theme = 'light';
+      return out;
+    })()`);
+    await send('Emulation.setEmulatedMedia', { features: [] });
+    for (const [theme, ratios] of Object.entries(phase3ThemeRatios)) {
+      assert.ok(ratios.noticeRatio >= 4.5, `${theme} noticeRatio=${ratios.noticeRatio}`);
+      assert.ok(ratios.summaryRatio >= 4.5, `${theme} summaryRatio=${ratios.summaryRatio}`);
+    }
+
+    // 引き継がれたユーザー名に触らずパスワードだけ入力して再ログイン成功
+    await setField('#login-password', 'new-phase3-5678');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'phase3_member' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    // ログアウト後は完了案内バナーが消えていること
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#login-notice').hidden"), true);
+    await click('#auth-close');
+    await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
   });
 
   if (process.env.FRONTEND_ARTIFACT_DIR) {
