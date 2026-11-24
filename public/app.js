@@ -41,6 +41,8 @@
     authOpen: false,
     authTab: 'login',
     postPasswordChangeNotice: false,
+    authSeq: 0,
+    bootstrapSeq: 0,
     isAuthSubmitting: false,
     user: null,                 // { id, username, role, mustChangePassword } | null
     anonAuthorDraft: '',
@@ -534,6 +536,11 @@
     else openAuthSheet();
   }
 
+  function commitAuthUser(nextUser) {
+    state.authSeq += 1;
+    state.user = nextUser || null;
+  }
+
   async function probeCurrentUser() {
     try {
       const res = await fetch('api/auth/me', {
@@ -553,9 +560,11 @@
   }
 
   async function fetchCurrentUser() {
+    const reqAuthSeq = state.authSeq;
     const probed = await probeCurrentUser();
     if (!probed.ok) return null;
-    state.user = probed.user;
+    if (reqAuthSeq !== state.authSeq) return state.user;
+    commitAuthUser(probed.user);
     syncAuthUI();
     return state.user;
   }
@@ -1083,6 +1092,8 @@
   }
 
   async function loadInitialData() {
+    const reqBootSeq = ++state.bootstrapSeq;
+    const reqAuthSeq = state.authSeq;
     showErrorBanner('');
     const loadingStatusEl = $('#initial-loading-status');
     let loadingTimer = null;
@@ -1107,10 +1118,14 @@
         credentials: 'same-origin',
       });
       const data = await res.json().catch(() => ({}));
+      if (reqBootSeq !== state.bootstrapSeq) return;
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
-      state.user = data.user || null;
-      syncAuthUI();
+      // R1対策：要求開始後に認証操作（登録・ログイン・ログアウト・PW変更等）が確定していれば古い応答の user を破棄する
+      if (reqAuthSeq === state.authSeq) {
+        state.user = data.user || null;
+        syncAuthUI();
+      }
 
       state.categories = Array.isArray(data.categories) ? data.categories : [];
       if (state.categories.length === 0) {
@@ -1161,6 +1176,7 @@
       syncHeaders();
       renderAllPosts();
     } catch (err) {
+      if (reqBootSeq !== state.bootstrapSeq) return;
       $('#breadcrumb-category').textContent = '通信エラー';
       $('#category-title').textContent = '掲示板を読み込めませんでした';
       $('#thread-category-tag').textContent = '-';
@@ -1170,7 +1186,9 @@
       syncSubmitAvailability();
     } finally {
       clearTimeout(loadingTimer);
-      if (loadingStatusEl) loadingStatusEl.hidden = true;
+      if (reqBootSeq === state.bootstrapSeq && loadingStatusEl) {
+        loadingStatusEl.hidden = true;
+      }
     }
   }
 
@@ -1338,6 +1356,7 @@
     syncSubmitAvailability();
     $('#form-error').textContent = '';
 
+    const reqAuthSeq = state.authSeq;
     try {
       const res = await fetch('api/posts', {
         method: 'POST',
@@ -1355,9 +1374,11 @@
       });
       const data = await res.json().catch(() => ({}));
       if (res.status === 401 && data.code === 'SESSION_EXPIRED') {
-        state.user = null;
-        state.pendingSessionExpired = true;
-        syncAuthUI();
+        if (reqAuthSeq === state.authSeq) {
+          commitAuthUser(null);
+          state.pendingSessionExpired = true;
+          syncAuthUI();
+        }
         $('#form-error').textContent = data.error || 'ログインの有効期限が切れています。';
         $('#expired-relogin-btn')?.focus({ preventScroll: true });
         return;
@@ -1556,7 +1577,7 @@
       openAuthSheet({ tab: 'login', reopenComposer: true });
     });
     $('#expired-anon-btn').addEventListener('click', () => {
-      state.user = null;
+      commitAuthUser(null);
       state.pendingSessionExpired = false;
       syncAuthUI();
       $('#comment-form').requestSubmit();
@@ -1621,7 +1642,7 @@
           return;
         }
         clearAuthPasswords();
-        state.user = data.user || null;
+        commitAuthUser(data.user);
         state.pendingSessionExpired = false;
         state.postPasswordChangeNotice = false;
         const shouldReopen = state.reopenComposerAfterAuth && !state.user?.mustChangePassword;
@@ -1689,7 +1710,7 @@
           return;
         }
         clearAuthPasswords();
-        state.user = data.user || null;
+        commitAuthUser(data.user);
         state.pendingSessionExpired = false;
         state.postPasswordChangeNotice = false;
         syncAuthUI();
@@ -1742,7 +1763,7 @@
         }
         const changedUsername = state.user?.username || '';
         clearAuthPasswords();
-        state.user = null;
+        commitAuthUser(null);
         state.authTab = 'login';
         state.postPasswordChangeNotice = true;
         syncAuthUI();
@@ -1791,7 +1812,7 @@
 
       try {
         if (logoutSucceeded) {
-          state.user = null;
+          commitAuthUser(null);
           state.authTab = 'login';
           state.pendingSessionExpired = false;
           state.postPasswordChangeNotice = false;
@@ -1803,7 +1824,7 @@
 
         const probed = await probeCurrentUser();
         if (probed.ok && probed.user === null) {
-          state.user = null;
+          commitAuthUser(null);
           state.authTab = 'login';
           state.pendingSessionExpired = false;
           state.postPasswordChangeNotice = false;
@@ -1814,7 +1835,7 @@
         }
 
         if (probed.ok && probed.user !== null) {
-          state.user = probed.user;
+          commitAuthUser(probed.user);
           syncAuthUI();
           $('#logout-error').textContent =
             serverErr || 'ログアウトを完了できませんでした。時間をおいて再度お試しください。';

@@ -25,11 +25,19 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'board-browser-test-'));
   const db = createBoardDb({ dbPath: ':memory:' });
   runSeed(db);
-  const server = createApp({ db, idSecret: 'frontend_browser_test_secret_32chars', devInsecureCookie: true, quiet: true });
+  const server = createApp({
+    db,
+    idSecret: 'frontend_browser_test_secret_32chars',
+    devInsecureCookie: true,
+    authRateLimitMaxPerIp: 100,
+    quiet: true,
+  });
   let holdPostResponse = false;
   let finishPost = null;
   let failThread = null;
   let bootstrapDelayMs = 0;
+  let holdBootstrap = false;
+  let finishBootstrap = null;
   let failBootstrapStatus = 0;
   let seenBootApiCalls = [];
   server.prependListener('request', (req, res) => {
@@ -42,6 +50,13 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       seenBootApiCalls.push(req.url);
     }
     if (req.url.startsWith('/board/api/bootstrap')) {
+      if (holdBootstrap) {
+        const savedEnd = res.end;
+        res.end = function (...args) {
+          finishBootstrap = () => savedEnd.apply(res, args);
+          return res;
+        };
+      }
       if (failBootstrapStatus) {
         const statusToSend = failBootstrapStatus;
         const origWriteHead = res.writeHead;
@@ -81,6 +96,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
   ], { windowsHide: true, stdio: 'ignore' });
   let socket;
   t.after(async () => {
+    finishBootstrap?.();
     finishPost?.();
     socket?.close();
     if (browser.exitCode === null) {
@@ -1062,6 +1078,83 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.equal(await evaluate("document.querySelector('#login-notice').hidden"), true);
     await click('#auth-close');
     await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
+  });
+
+  await t.test('レビュー回帰(R1): 古いbootstrap応答が登録・ログアウト後の認証表示を上書きしないこと・版表示v1.0.1確認', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+    // 1. 順方向: 未ログイン状態の bootstrap 応答を遅延させ、その間に会員登録を完了しても「ログイン」へ戻らないこと
+    finishBootstrap = null;
+    holdBootstrap = true;
+    await send('Page.navigate', { url: url + '?bootstrapRaceRegister=1#thread-1' });
+    for (let attempt = 0; !finishBootstrap && attempt < 100; attempt += 1) await delay(30);
+    assert.ok(finishBootstrap);
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-tab-register');
+    await setField('#register-username', 'race_reg_user');
+    await setField('#register-password', 'race-reg-pass-1234');
+    await setField('#register-password-confirm', 'race-reg-pass-1234');
+    await evaluate("document.querySelector('#register-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    holdBootstrap = false;
+    finishBootstrap();
+    finishBootstrap = null;
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+
+    assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'race_reg_user');
+    assert.equal(await evaluate("fetch('api/auth/me').then((r) => r.json()).then((d) => d.user?.username || null)"), 'race_reg_user');
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#author-name').value"), 'race_reg_user');
+    assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), true);
+    await click('#composer-close');
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+
+    // 2. 逆方向: ログイン済み状態の bootstrap 応答を遅延させ、その間にログアウト完了しても会員表示へ巻き戻らないこと
+    holdBootstrap = true;
+    await send('Page.navigate', { url: url + '?bootstrapRaceLogout=1#thread-1' });
+    for (let attempt = 0; !finishBootstrap && attempt < 100; attempt += 1) await delay(30);
+    assert.ok(finishBootstrap);
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', 'race_reg_user');
+    await setField('#login-password', 'race-reg-pass-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    holdBootstrap = false;
+    finishBootstrap();
+    finishBootstrap = null;
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+
+    assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'ログイン');
+    assert.equal(await evaluate("fetch('api/auth/me').then((r) => r.json()).then((d) => d.user)"), null);
+
+    // 3. 版表示が v1.0.1 に統一され v0.5 が残っていないこと
+    const versionText = await evaluate(`({
+      sidebar: document.querySelector('.sidebar-bottom')?.textContent || '',
+      footer: document.querySelector('.page-footer')?.textContent || '',
+      badge: document.querySelector('.footer-version')?.textContent || '',
+    })`);
+    assert.ok(versionText.sidebar.includes('v1.0.1') && !versionText.sidebar.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.footer.includes('v1.0.1') && !versionText.footer.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.badge.includes('v1.0.1') && !versionText.badge.includes('v0.5'), JSON.stringify(versionText));
   });
 
   if (process.env.FRONTEND_ARTIFACT_DIR) {

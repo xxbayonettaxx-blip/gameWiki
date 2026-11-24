@@ -16,6 +16,7 @@ const path = require('node:path');
 const { PROJECT_ROOT, createBoardDb, resolveProjectDbPath } = require('./src/db');
 const { DEFAULT_PUBLIC_DIR, createApp } = require('./src/app');
 const { validateIdSecret } = require('./src/validators');
+const { version: APP_VERSION } = require('./package.json');
 
 function resolvePublicDir(rawPublicDir) {
   if (!rawPublicDir || rawPublicDir.trim() === '') {
@@ -76,7 +77,7 @@ function startServer() {
   server.listen(port, host, () => {
     const addr = server.address();
     console.log('==========================================================');
-    console.log('[STARTUP] basic_board v1.0-dev が起動しました');
+    console.log(`[STARTUP] basic_board v${APP_VERSION} が起動しました`);
     console.log(`[STARTUP] 待受アドレス : http://${addr.address}:${addr.port}`);
     console.log(`[STARTUP] 公開フォルダ : ${publicDir}`);
     console.log(`[STARTUP] DBファイル   : ${dbStatus.dbPath}`);

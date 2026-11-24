@@ -1,6 +1,6 @@
 {
   "name": "basic-board",
-  "version": "0.5.0",
+  "version": "1.0.1",
   "description": "汎用小規模掲示板 MVP (ツリー返信・日替わりID・論理削除・アクセシビリティ対応)",
   "main": "server.js",
   "type": "commonjs",
