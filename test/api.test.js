@@ -1394,3 +1394,92 @@ test('Phase 1(T1-1/T1-2/T2-1): /api/bootstrap まとめ取得・静的ETag(304)�
     assert.equal(privacyHtml.includes(forbidden), false, `privacy.html must not contain ${forbidden}`);
   }
 });
+
+test('別タブログアウト相当(expect_auth: true + Cookieなし)で暗黙匿名化せず401 SESSION_EXPIREDを返すこと', async (t) => {
+  const fastScryptQueue = createScryptQueue({ scryptFn: makeFastScryptFn() });
+  const ctx = await startTestServer({
+    scryptQueue: fastScryptQueue,
+    devInsecureCookie: true,
+  });
+  t.after(() => ctx.stop());
+
+  const beforeCount = ctx.db.getThreadDetail(1).posts.length;
+
+  // 1. Cookieなし + expect_auth: true -> 401 SESSION_EXPIRED（匿名保存しない）
+  const expiredNoCookie = await fetch(`${ctx.baseUrl}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: ctx.baseUrl },
+    body: JSON.stringify({
+      thread_id: 1,
+      parent_id: null,
+      author_name: '元の会員',
+      content: '別タブログアウト後の保護対象本文',
+      expect_auth: true,
+    }),
+  });
+  assert.equal(expiredNoCookie.status, 401);
+  assert.equal((await expiredNoCookie.json()).code, 'SESSION_EXPIRED');
+  assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount);
+
+  // 2. expect_auth に真偽値以外を指定 -> 400
+  const invalidFlagRes = await fetch(`${ctx.baseUrl}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: ctx.baseUrl },
+    body: JSON.stringify({
+      thread_id: 1,
+      parent_id: null,
+      author_name: '名無しさん',
+      content: '不正型テスト',
+      expect_auth: 'yes',
+    }),
+  });
+  assert.equal(invalidFlagRes.status, 400);
+  assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount);
+
+  // 3. Cookieなし + expect_auth: false -> 通常の匿名投稿として 201
+  const explicitAnonRes = await fetch(`${ctx.baseUrl}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: ctx.baseUrl },
+    body: JSON.stringify({
+      thread_id: 1,
+      parent_id: null,
+      author_name: '匿名希望',
+      content: '明示的な匿名投稿本文',
+      expect_auth: false,
+    }),
+  });
+  assert.equal(explicitAnonRes.status, 201);
+  const anonBody = await explicitAnonRes.json();
+  assert.equal(anonBody.post.is_member, false);
+  assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount + 1);
+
+  // 4. 有効Cookie + expect_auth: true -> 会員投稿として 201
+  const regRes = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: ctx.baseUrl },
+    body: JSON.stringify({ username: 'expect_auth_user', password: 'expect-pass-1234' }),
+  });
+  assert.equal(regRes.status, 201);
+  const cookiePair = extractSetCookiePair(regRes);
+
+  const memberRes = await fetch(`${ctx.baseUrl}/api/posts`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: ctx.baseUrl,
+      Cookie: cookiePair,
+    },
+    body: JSON.stringify({
+      thread_id: 1,
+      parent_id: null,
+      author_name: '偽装名',
+      content: '有効セッションでの会員投稿',
+      expect_auth: true,
+    }),
+  });
+  assert.equal(memberRes.status, 201);
+  const memberBody = await memberRes.json();
+  assert.equal(memberBody.post.is_member, true);
+  assert.equal(memberBody.post.author_name, 'expect_auth_user');
+  assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount + 2);
+});

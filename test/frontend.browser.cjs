@@ -1157,6 +1157,62 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.ok(versionText.badge.includes('v1.0.1') && !versionText.badge.includes('v0.5'), JSON.stringify(versionText));
   });
 
+  await t.test('実機回帰(ID14): 別タブログアウトでCookie消失後の送信が暗黙匿名化されず下書き保持→再ログイン継続できること', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', 'race_reg_user');
+    await setField('#login-password', 'race-reg-pass-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    await write('別タブログアウト後も消えない下書き');
+
+    // 別タブからのログアウトを模擬：このタブのUI状態は変えずCookieのみ消滅させる
+    const bgLogoutStatus = await evaluate(
+      "fetch('api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: '{}' }).then((r) => r.status)"
+    );
+    assert.equal(bgLogoutStatus, 200);
+
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#session-expired-box').hidden");
+    assert.equal(await evaluate("document.querySelector('#comment-body').value"), '別タブログアウト後も消えない下書き');
+    assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'ログイン');
+    assert.equal(db.getThreadDetail(1).posts.some((p) => p.content === '別タブログアウト後も消えない下書き'), false);
+
+    // 再ログインして下書きを会員としてそのまま送信完了できること
+    await click('#expired-relogin-btn');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', 'race_reg_user');
+    await setField('#login-password', 'race-reg-pass-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && document.querySelector('#composer-drawer').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#comment-body').value"), '別タブログアウト後も消えない下書き');
+    assert.equal(await evaluate("document.querySelector('#author-name').value"), 'race_reg_user');
+    assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), true);
+
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#submit-button').disabled && document.querySelector('#comment-body').value === ''");
+    const saved = db.getThreadDetail(1).posts.find((p) => p.content === '別タブログアウト後も消えない下書き');
+    assert.ok(saved);
+    assert.equal(saved.is_member, true);
+    assert.equal(saved.author_name, 'race_reg_user');
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+  });
+
   if (process.env.FRONTEND_ARTIFACT_DIR) {
     fs.mkdirSync(process.env.FRONTEND_ARTIFACT_DIR, { recursive: true });
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });

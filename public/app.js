@@ -1346,11 +1346,12 @@
       return;
     }
 
-    // 送信開始時点のスレッドID・返信先ID・名前・本文をローカル定数に固定する
+    // 送信開始時点のスレッドID・返信先ID・名前・本文・認証意図をローカル定数に固定する
     const submitThreadId = state.activeThreadId;
     const submitReplyId = state.replyTarget ? state.replyTarget.id : null;
     const submitAuthor = $('#author-name').value;
     const submitContent = rawContent;
+    const submitExpectAuth = Boolean(state.user);
 
     state.isSubmitting = true;
     syncSubmitAvailability();
@@ -1370,6 +1371,7 @@
           parent_id: submitReplyId,
           author_name: submitAuthor,
           content: submitContent,
+          expect_auth: submitExpectAuth,
         }),
       });
       const data = await res.json().catch(() => ({}));

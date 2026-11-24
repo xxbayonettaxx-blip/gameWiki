@@ -933,13 +933,30 @@ function createApp(options = {}) {
         }
 
         const rawBody = await readJsonBody(req, maxBodyBytes);
+        if (
+          rawBody &&
+          typeof rawBody === 'object' &&
+          !Array.isArray(rawBody) &&
+          rawBody.expect_auth !== undefined &&
+          typeof rawBody.expect_auth !== 'boolean'
+        ) {
+          throw new ValidationError('expect_auth は真偽値で指定してください。', 400);
+        }
+        const expectAuth = Boolean(
+          rawBody &&
+            typeof rawBody === 'object' &&
+            !Array.isArray(rawBody) &&
+            rawBody.expect_auth === true
+        );
         // 本文読取り完了後の時刻でセッション期限と日替わりIDを一貫判定する（読取中の期限切れ通過を防止）
         const actionNowDate = nowFn();
         const actionNowIso = actionNowDate.toISOString();
         const sess = resolveRequestSession(req, actionNowIso);
 
-        // 無効・期限切れCookieが付いていた場合は黙って匿名化せず、明確な401で再送信選択させる
-        if (sess.status === 'invalid') {
+        // 無効・期限切れCookieが付いていた場合、または会員投稿を意図(expect_auth: true)したのに
+        // 別タブログアウト等でCookieが消えていた場合は黙って匿名化せず、明確な401で再送信選択させる
+        if (sess.status === 'invalid' || (expectAuth && sess.status !== 'valid')) {
+          const extraHeaders = sess.status === 'invalid' ? buildClearCookieHeaders() : {};
           sendJson(
             res,
             401,
@@ -948,7 +965,7 @@ function createApp(options = {}) {
                 'ログインの有効期限が切れています。再ログインするか、ログアウト状態（匿名）として再送信してください。',
               code: 'SESSION_EXPIRED',
             },
-            buildClearCookieHeaders()
+            extraHeaders
           );
           return;
         }
