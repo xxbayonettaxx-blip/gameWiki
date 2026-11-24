@@ -1213,6 +1213,104 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
   });
 
+  await t.test('昇格前レビュー回帰(R1): 別タブアカウント切替(会員A→B／匿名→会員A)で意図せぬ投稿を防ぎ下書き保持で切替・ログアウト継続できること', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+
+    // 経路1 (PC幅): 会員Aで下書き作成 → 別タブで会員Bへ切替 → 409阻止＆表示更新 → 会員Bで継続送信
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', 'race_reg_user');
+    await setField('#login-password', 'race-reg-pass-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    await setField('#comment-body', '会員A→B切替テスト本文');
+
+    // 別タブでの新規登録（別アカウントBへのセッション上書き）を模擬
+    const regBStatus = await evaluate(
+      "fetch('api/auth/register', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ username: 'r1_tab2_user', password: 'r1-tab2-pass-1234' }) }).then((r) => r.status)"
+    );
+    assert.equal(regBStatus, 201);
+
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#auth-changed-box').hidden");
+    assert.equal(db.getThreadDetail(1).posts.some((p) => p.content === '会員A→B切替テスト本文'), false);
+    assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'r1_tab2_user');
+    assert.equal(await evaluate("document.querySelector('#author-name').value"), 'r1_tab2_user');
+    assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), true);
+    assert.equal(await evaluate("document.querySelector('#comment-body').value"), '会員A→B切替テスト本文');
+    assert.equal(await evaluate("document.activeElement?.id"), 'auth-changed-open-account-btn');
+
+    // 切替後アカウント(r1_tab2_user)を確認した上で再送信すると保存され警告が閉じること
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#submit-button').disabled && document.querySelector('#comment-body').value === ''");
+    assert.equal(await evaluate("document.querySelector('#auth-changed-box').hidden"), true);
+    assert.equal(await evaluate("document.querySelector('#form-error').textContent"), '');
+    const postAsB = db.getThreadDetail(1).posts.find((p) => p.content === '会員A→B切替テスト本文');
+    assert.ok(postAsB);
+    assert.equal(postAsB.is_member, true);
+    assert.equal(postAsB.author_name, 'r1_tab2_user');
+
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    // 経路2 (モバイル幅): 匿名＋ペンネーム下書き → 別タブで会員Aログイン → 409阻止＆匿名名退避 → 案内ボタンからログアウトしドロワー再オープン＆匿名再送完了
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await click('#write-comment');
+    await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+    await setField('#author-name', '匿名ペンネームR1');
+    await setField('#comment-body', '匿名→会員切替テスト本文');
+
+    const bgLoginAStatus = await evaluate(
+      "fetch('api/auth/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ username: 'race_reg_user', password: 'race-reg-pass-1234' }) }).then((r) => r.status)"
+    );
+    assert.equal(bgLoginAStatus, 200);
+
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#auth-changed-box').hidden");
+    assert.equal(db.getThreadDetail(1).posts.some((p) => p.content === '匿名→会員切替テスト本文'), false);
+    assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'race_reg_user');
+    assert.equal(await evaluate("document.querySelector('#author-name').value"), 'race_reg_user');
+    assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), true);
+    assert.equal(await evaluate("document.querySelector('#comment-body').value"), '匿名→会員切替テスト本文');
+    assert.equal(await evaluate("document.activeElement?.id"), 'auth-changed-open-account-btn');
+
+    await click('#auth-changed-open-account-btn');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#logout-button');
+    await waitFor(
+      "document.querySelector('#auth-open-label')?.textContent === 'ログイン' && " +
+        "!document.querySelector('#auth-sheet').classList.contains('is-open') && " +
+        "document.querySelector('#composer-drawer').classList.contains('is-open')"
+    );
+    assert.equal(await evaluate("document.querySelector('#auth-changed-box').hidden"), true);
+    assert.equal(await evaluate("document.querySelector('#form-error').textContent"), '');
+    assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), false);
+    assert.equal(await evaluate("document.querySelector('#author-name').value"), '匿名ペンネームR1');
+    assert.equal(await evaluate("document.querySelector('#comment-body').value"), '匿名→会員切替テスト本文');
+
+    await evaluate("document.querySelector('#comment-form').requestSubmit()");
+    await waitFor("!document.querySelector('#submit-button').disabled && document.querySelector('#comment-body').value === ''");
+    const postAsAnon = db.getThreadDetail(1).posts.find((p) => p.content === '匿名→会員切替テスト本文');
+    assert.ok(postAsAnon);
+    assert.equal(postAsAnon.is_member, false);
+    assert.equal(postAsAnon.author_name, '匿名ペンネームR1');
+
+    await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  });
+
   if (process.env.FRONTEND_ARTIFACT_DIR) {
     fs.mkdirSync(process.env.FRONTEND_ARTIFACT_DIR, { recursive: true });
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });

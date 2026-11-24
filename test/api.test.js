@@ -1483,3 +1483,212 @@ test('別タブログアウト相当(expect_auth: true + Cookieなし)で暗黙�
   assert.equal(memberBody.post.author_name, 'expect_auth_user');
   assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount + 2);
 });
+
+test('昇格前レビュー回帰(R1): POST /api/posts は expected_user_id で別タブアカウント切替(会員A→B／匿名→会員A)を409で阻止すること', async (t) => {
+  const http = require('node:http');
+  const fastScryptQueue = createScryptQueue({ scryptFn: makeFastScryptFn() });
+  const ctx = await startTestServer({
+    scryptQueue: fastScryptQueue,
+    devInsecureCookie: true,
+  });
+  t.after(() => ctx.stop());
+
+  const origin = ctx.baseUrl;
+  const regA = await fetch(`${origin}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'r1_member_a', password: 'r1-password-aaa' }),
+  });
+  assert.equal(regA.status, 201);
+  const cookieA = extractSetCookiePair(regA);
+  const userA = (await regA.json()).user;
+
+  const regB = await fetch(`${origin}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'r1_member_b', password: 'r1-password-bbb' }),
+  });
+  assert.equal(regB.status, 201);
+  const cookieB = extractSetCookiePair(regB);
+  const userB = (await regB.json()).user;
+
+  const beforeCount = ctx.db.getThreadDetail(1).posts.length;
+
+  // 1. 不正な型・範囲・矛盾指定は400で拒否しDB不変
+  for (const invalidBody of [
+    { thread_id: 1, content: 'bad_type', expect_auth: false, expected_user_id: '1' },
+    { thread_id: 1, content: 'bad_zero', expect_auth: true, expected_user_id: 0 },
+    { thread_id: 1, content: 'bad_neg', expect_auth: true, expected_user_id: -5 },
+    { thread_id: 1, content: 'bad_float', expect_auth: true, expected_user_id: 1.5 },
+    { thread_id: 1, content: 'conflict_1', expect_auth: true, expected_user_id: null },
+    { thread_id: 1, content: 'conflict_2', expect_auth: false, expected_user_id: userA.id },
+  ]) {
+    const res = await fetch(`${origin}/api/posts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: cookieA },
+      body: JSON.stringify(invalidBody),
+    });
+    assert.equal(res.status, 400);
+  }
+
+  // 2. expected_user_id だけ正整数でセッションなし -> 401 SESSION_EXPIRED
+  const missingSessRes = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'missing_session_expected_id',
+      expected_user_id: userA.id,
+    }),
+  });
+  assert.equal(missingSessRes.status, 401);
+  assert.equal((await missingSessRes.json()).code, 'SESSION_EXPIRED');
+
+  // 3. 無効Cookie付きで expected_user_id: null -> 401 SESSION_EXPIRED (Set-Cookie削除付き)
+  const invalidCookieAnonRes = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: origin,
+      Cookie: 'board_session_dev=invalid_stale_token_1234',
+    },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'invalid_cookie_anon_expected',
+      expect_auth: false,
+      expected_user_id: null,
+    }),
+  });
+  assert.equal(invalidCookieAnonRes.status, 401);
+  assert.ok(invalidCookieAnonRes.headers.get('set-cookie')?.includes('Max-Age=0'));
+  assert.equal((await invalidCookieAnonRes.json()).code, 'SESSION_EXPIRED');
+
+  // 4. 会員A想定で別タブが会員Bへ切替済み -> 409 AUTH_USER_MISMATCH + currentUser=B
+  const aToBRes = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: cookieB },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'member_a_switched_to_b',
+      expect_auth: true,
+      expected_user_id: userA.id,
+    }),
+  });
+  assert.equal(aToBRes.status, 409);
+  const aToBBody = await aToBRes.json();
+  assert.equal(aToBBody.code, 'AUTH_USER_MISMATCH');
+  assert.deepEqual(aToBBody.currentUser, {
+    id: userB.id,
+    username: 'r1_member_b',
+    role: 'user',
+    mustChangePassword: false,
+  });
+
+  // 5. 匿名想定で別タブが会員Aへログイン済み -> 409 AUTH_USER_MISMATCH + currentUser=A
+  const anonToARes = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: cookieA },
+    body: JSON.stringify({
+      thread_id: 1,
+      author_name: 'ペンネーム維持',
+      content: 'anon_switched_to_member_a',
+      expect_auth: false,
+      expected_user_id: null,
+    }),
+  });
+  assert.equal(anonToARes.status, 409);
+  const anonToABody = await anonToARes.json();
+  assert.equal(anonToABody.code, 'AUTH_USER_MISMATCH');
+  assert.deepEqual(anonToABody.currentUser, {
+    id: userA.id,
+    username: 'r1_member_a',
+    role: 'user',
+    mustChangePassword: false,
+  });
+
+  // いずれの拒否でも投稿は一切保存されていないこと
+  assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount);
+
+  // 6. 本文ストリーム読取中にセッションが失効された場合も完了後時刻・状態で401拒否されること
+  const sendChunkedDuringRevoke = () =>
+    new Promise((resolve, reject) => {
+      const reqPromise = new Promise((resReq) => ctx.server.once('request', resReq));
+      const req = http.request(
+        `${origin}/api/posts`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: origin,
+            Cookie: cookieA,
+            Connection: 'close',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (part) => {
+            body += part;
+          });
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+        }
+      );
+      req.on('error', reject);
+      req.write(`{"thread_id":1,"expect_auth":true,"expected_user_id":${userA.id},`);
+      reqPromise
+        .then(() => new Promise((r) => setTimeout(r, 10)))
+        .then(() => {
+          ctx.db.revokeAllSessionsByUsername('r1_member_a');
+          req.end('"content":"chunked_revoked_post"}');
+        })
+        .catch(reject);
+    });
+  const chunkedRevoked = await sendChunkedDuringRevoke();
+  assert.equal(chunkedRevoked.status, 401);
+  assert.equal(chunkedRevoked.body.code, 'SESSION_EXPIRED');
+  assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount);
+
+  // 7. 一致時（会員B / 匿名 / expected_user_id 省略の後方互換）は正常に201保存されること
+  const matchBRes = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: cookieB },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'match_member_b',
+      expect_auth: true,
+      expected_user_id: userB.id,
+    }),
+  });
+  assert.equal(matchBRes.status, 201);
+  const matchBBody = await matchBRes.json();
+  assert.equal(matchBBody.post.is_member, true);
+  assert.equal(matchBBody.post.author_name, 'r1_member_b');
+
+  const matchAnonRes = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({
+      thread_id: 1,
+      author_name: '意図通りの匿名',
+      content: 'match_anon',
+      expect_auth: false,
+      expected_user_id: null,
+    }),
+  });
+  assert.equal(matchAnonRes.status, 201);
+  const matchAnonBody = await matchAnonRes.json();
+  assert.equal(matchAnonBody.post.is_member, false);
+  assert.equal(matchAnonBody.post.author_name, '意図通りの匿名');
+
+  const legacyClientRes = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: cookieB },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'legacy_client_without_expected_id',
+      expect_auth: true,
+    }),
+  });
+  assert.equal(legacyClientRes.status, 201);
+  assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount + 3);
+});

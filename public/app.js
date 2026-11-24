@@ -21,6 +21,8 @@
   const ALLOWED_SORTS = ['new', 'activity', 'old'];
   const AVATAR_COLORS = ['', 'sage', 'sand', 'blue'];
   const MAX_VISUAL_DEPTH = 2; // 親(0)・子(1)・孫(2)の3層までインデント、4層目以降はフラット
+  const AUTH_MISMATCH_FORM_ERROR =
+    'アカウント状態が変更されたため送信を中断しました（下書きは保持しています）。';
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -47,6 +49,7 @@
     user: null,                 // { id, username, role, mustChangePassword } | null
     anonAuthorDraft: '',
     pendingSessionExpired: false,
+    pendingAuthChangedMessage: '',
     reopenComposerAfterAuth: false,
     isSubmitting: false,
     loadSeq: 0,
@@ -417,6 +420,8 @@
     const authNote = $('#composer-auth-note');
     const mustChangeBox = $('#composer-must-change-box');
     const expiredBox = $('#session-expired-box');
+    const authChangedBox = $('#auth-changed-box');
+    const authChangedMessage = $('#auth-changed-message');
 
     if (authorInput) {
       if (state.user) {
@@ -442,8 +447,15 @@
           authNote.textContent = '';
         }
         if (mustChangeBox) mustChangeBox.hidden = true;
+        state.pendingAuthChangedMessage = '';
         if (expiredBox) expiredBox.hidden = !state.pendingSessionExpired;
       }
+    }
+
+    const showAuthChanged = Boolean(state.user && state.pendingAuthChangedMessage);
+    if (authChangedBox) authChangedBox.hidden = !showAuthChanged;
+    if (authChangedMessage) {
+      authChangedMessage.textContent = showAuthChanged ? state.pendingAuthChangedMessage : '';
     }
 
     syncSubmitAvailability();
@@ -1352,6 +1364,7 @@
     const submitAuthor = $('#author-name').value;
     const submitContent = rawContent;
     const submitExpectAuth = Boolean(state.user);
+    const submitExpectedUserId = state.user ? state.user.id : null;
 
     state.isSubmitting = true;
     syncSubmitAvailability();
@@ -1372,6 +1385,7 @@
           author_name: submitAuthor,
           content: submitContent,
           expect_auth: submitExpectAuth,
+          expected_user_id: submitExpectedUserId,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -1379,13 +1393,33 @@
         if (reqAuthSeq === state.authSeq) {
           commitAuthUser(null);
           state.pendingSessionExpired = true;
+          state.pendingAuthChangedMessage = '';
           syncAuthUI();
         }
         $('#form-error').textContent = data.error || 'ログインの有効期限が切れています。';
         $('#expired-relogin-btn')?.focus({ preventScroll: true });
         return;
       }
+      if (res.status === 409 && data.code === 'AUTH_USER_MISMATCH') {
+        const mismatchMsg =
+          data.error ||
+          '別タブ等でログイン状態が切り替わっています。下書きは保持しているため、現在のアカウントを確認してから再度操作してください。';
+        if (reqAuthSeq === state.authSeq) {
+          if (data.currentUser && typeof data.currentUser === 'object') {
+            commitAuthUser(data.currentUser);
+          } else {
+            await fetchCurrentUser();
+          }
+          state.pendingSessionExpired = false;
+          state.pendingAuthChangedMessage = mismatchMsg;
+          syncAuthUI();
+        }
+        $('#form-error').textContent = AUTH_MISMATCH_FORM_ERROR;
+        $('#auth-changed-open-account-btn')?.focus({ preventScroll: true });
+        return;
+      }
       if (res.status === 403 && data.code === 'PASSWORD_CHANGE_REQUIRED') {
+        state.pendingAuthChangedMessage = '';
         await fetchCurrentUser();
         $('#form-error').textContent = data.error || '仮パスワードのままでは投稿できません。';
         return;
@@ -1395,6 +1429,7 @@
       }
 
       state.pendingSessionExpired = false;
+      state.pendingAuthChangedMessage = '';
       syncAuthUI();
 
       // 成功した送信先の下書きだけを消し、別スレッドや別の返信先での編集を保持する。
@@ -1573,16 +1608,33 @@
 
     $('#comment-form').addEventListener('submit', handleSubmit);
 
-    // 仮パスワード制限 / セッション期限切れ時の案内アクション
+    function clearPendingComposerAuthAlerts() {
+      const formErrorEl = $('#form-error');
+      if (
+        formErrorEl &&
+        state.pendingAuthChangedMessage &&
+        (formErrorEl.textContent === state.pendingAuthChangedMessage ||
+          formErrorEl.textContent === AUTH_MISMATCH_FORM_ERROR)
+      ) {
+        formErrorEl.textContent = '';
+      }
+      state.pendingSessionExpired = false;
+      state.pendingAuthChangedMessage = '';
+    }
+
+    // 仮パスワード制限 / セッション期限切れ / アカウント切替時の案内アクション
     $('#composer-open-password-btn').addEventListener('click', () => openAuthSheet());
     $('#expired-relogin-btn').addEventListener('click', () => {
       openAuthSheet({ tab: 'login', reopenComposer: true });
     });
     $('#expired-anon-btn').addEventListener('click', () => {
       commitAuthUser(null);
-      state.pendingSessionExpired = false;
+      clearPendingComposerAuthAlerts();
       syncAuthUI();
       $('#comment-form').requestSubmit();
+    });
+    $('#auth-changed-open-account-btn').addEventListener('click', () => {
+      openAuthSheet({ reopenComposer: true });
     });
 
     // アカウント認証シート（開閉・タブ切替・登録・ログイン・パスワード変更・ログアウト）
@@ -1645,7 +1697,7 @@
         }
         clearAuthPasswords();
         commitAuthUser(data.user);
-        state.pendingSessionExpired = false;
+        clearPendingComposerAuthAlerts();
         state.postPasswordChangeNotice = false;
         const shouldReopen = state.reopenComposerAfterAuth && !state.user?.mustChangePassword;
         syncAuthUI();
@@ -1713,11 +1765,18 @@
         }
         clearAuthPasswords();
         commitAuthUser(data.user);
-        state.pendingSessionExpired = false;
+        clearPendingComposerAuthAlerts();
         state.postPasswordChangeNotice = false;
+        const shouldReopen = state.reopenComposerAfterAuth && !state.user?.mustChangePassword;
         syncAuthUI();
-        closeAuthSheet();
-        notify(`アカウント「${state.user.username}」を作成しログインしました。`);
+        if (shouldReopen) {
+          closeAuthSheet({ restoreFocus: false });
+          openComposer(null, $('#write-comment'));
+          notify(`アカウント「${state.user.username}」を作成しログインしました。投稿を続けられます。`);
+        } else {
+          closeAuthSheet();
+          notify(`アカウント「${state.user.username}」を作成しログインしました。`);
+        }
       } catch {
         $('#register-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
       } finally {
@@ -1767,6 +1826,7 @@
         clearAuthPasswords();
         commitAuthUser(null);
         state.authTab = 'login';
+        clearPendingComposerAuthAlerts();
         state.postPasswordChangeNotice = true;
         syncAuthUI();
         if (changedUsername && $('#login-username')) {
@@ -1813,26 +1873,30 @@
       }
 
       try {
-        if (logoutSucceeded) {
+        const finishLoggedOut = (noticeText) => {
           commitAuthUser(null);
           state.authTab = 'login';
-          state.pendingSessionExpired = false;
+          clearPendingComposerAuthAlerts();
           state.postPasswordChangeNotice = false;
+          const shouldReopen = state.reopenComposerAfterAuth;
           syncAuthUI();
-          closeAuthSheet();
-          notify('ログアウトしました。');
+          if (shouldReopen) {
+            closeAuthSheet({ restoreFocus: false });
+            openComposer(null, $('#write-comment'));
+          } else {
+            closeAuthSheet();
+          }
+          notify(noticeText);
+        };
+
+        if (logoutSucceeded) {
+          finishLoggedOut('ログアウトしました。');
           return;
         }
 
         const probed = await probeCurrentUser();
         if (probed.ok && probed.user === null) {
-          commitAuthUser(null);
-          state.authTab = 'login';
-          state.pendingSessionExpired = false;
-          state.postPasswordChangeNotice = false;
-          syncAuthUI();
-          closeAuthSheet();
-          notify('ログアウトを確認しました。');
+          finishLoggedOut('ログアウトを確認しました。');
           return;
         }
 

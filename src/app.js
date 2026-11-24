@@ -933,29 +933,44 @@ function createApp(options = {}) {
         }
 
         const rawBody = await readJsonBody(req, maxBodyBytes);
-        if (
-          rawBody &&
-          typeof rawBody === 'object' &&
-          !Array.isArray(rawBody) &&
-          rawBody.expect_auth !== undefined &&
-          typeof rawBody.expect_auth !== 'boolean'
-        ) {
+        const bodyObj =
+          rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody) ? rawBody : null;
+
+        // 送信意図（認証あり／なし・想定ユーザーID）の型と整合性を検証する
+        if (bodyObj && bodyObj.expect_auth !== undefined && typeof bodyObj.expect_auth !== 'boolean') {
           throw new ValidationError('expect_auth は真偽値で指定してください。', 400);
         }
-        const expectAuth = Boolean(
-          rawBody &&
-            typeof rawBody === 'object' &&
-            !Array.isArray(rawBody) &&
-            rawBody.expect_auth === true
-        );
+        const hasExpectedUserId = Boolean(bodyObj && bodyObj.expected_user_id !== undefined);
+        const expectedUserId = hasExpectedUserId ? bodyObj.expected_user_id : undefined;
+        if (
+          hasExpectedUserId &&
+          expectedUserId !== null &&
+          (!Number.isSafeInteger(expectedUserId) || expectedUserId < 1)
+        ) {
+          throw new ValidationError('expected_user_id は null または正の整数で指定してください。', 400);
+        }
+        if (bodyObj && hasExpectedUserId) {
+          if (bodyObj.expect_auth === true && expectedUserId === null) {
+            throw new ValidationError('expect_auth と expected_user_id の指定が矛盾しています。', 400);
+          }
+          if (bodyObj.expect_auth === false && typeof expectedUserId === 'number') {
+            throw new ValidationError('expect_auth と expected_user_id の指定が矛盾しています。', 400);
+          }
+        }
+        const expectAuth = Boolean(bodyObj && bodyObj.expect_auth === true);
+
         // 本文読取り完了後の時刻でセッション期限と日替わりIDを一貫判定する（読取中の期限切れ通過を防止）
+        // ※ DB保存までawaitを挟まず同期的に処理し、判定後のレースを防ぐ
         const actionNowDate = nowFn();
         const actionNowIso = actionNowDate.toISOString();
         const sess = resolveRequestSession(req, actionNowIso);
 
-        // 無効・期限切れCookieが付いていた場合、または会員投稿を意図(expect_auth: true)したのに
+        // 無効・期限切れCookieが付いていた場合、または会員投稿を意図(expect_auth / expected_user_id指定)したのに
         // 別タブログアウト等でCookieが消えていた場合は黙って匿名化せず、明確な401で再送信選択させる
-        if (sess.status === 'invalid' || (expectAuth && sess.status !== 'valid')) {
+        if (
+          sess.status === 'invalid' ||
+          ((expectAuth || typeof expectedUserId === 'number') && sess.status !== 'valid')
+        ) {
           const extraHeaders = sess.status === 'invalid' ? buildClearCookieHeaders() : {};
           sendJson(
             res,
@@ -967,6 +982,27 @@ function createApp(options = {}) {
             },
             extraHeaders
           );
+          return;
+        }
+
+        // expected_user_id 指定時（現行フロント）、別タブでのアカウント切替（会員A→B、匿名→会員A）を検出したら
+        // 意図しない投稿者として保存せず409で現在の認証状態を返す（未指定の旧クライアントは後方互換のためスキップ）
+        if (hasExpectedUserId && sess.status === 'valid' && expectedUserId !== sess.auth.user.id) {
+          const currentUser = {
+            id: sess.auth.user.id,
+            username: sess.auth.user.username,
+            role: sess.auth.user.role,
+            mustChangePassword: Boolean(sess.auth.user.mustChangePassword),
+          };
+          const mismatchMessage =
+            expectedUserId === null
+              ? `別タブ等で「${currentUser.username}」としてログインされています。下書きを保持したまま表示を切り替えたため、このまま会員として投稿するか、アカウント画面からログアウトしてください。`
+              : `別タブ等でログイン中のアカウントが「${currentUser.username}」に切り替わっています。下書きを保持しているため、このアカウントのまま投稿するか、アカウント画面で切り替えてから再度送信してください。`;
+          sendJson(res, 409, {
+            error: mismatchMessage,
+            code: 'AUTH_USER_MISMATCH',
+            currentUser,
+          });
           return;
         }
 
