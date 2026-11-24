@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="コミュニティ掲示板 — スレッド選択・ツリー返信・日替わりID対応の交流広場">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 44'%3E%3Cpath d='M22 4 41 37H31L22 21 13 37H3Z' fill='%23202432'/%3E%3Cpath d='m17 32 5-9 5 9Z' fill='%236154b4'/%3E%3C/svg%3E">
   <title>UNLOCKの掲示板</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -143,7 +144,7 @@
                 aria-describedby="register-hint register-error"
                 required
               >
-              <small id="register-hint" class="auth-field-hint">日本語・英数字どちらも使えます。</small>
+              <small id="register-hint" class="auth-field-hint">日本語・英数字どちらも使えます。登録したユーザー名は投稿者名として閲覧者に表示されるため、本名や他サイトで特定可能なIDは使用しないでください。</small>
             </label>
             <label class="auth-field" for="register-password">
               <span>パスワード（8〜128文字）</span>
@@ -174,6 +175,7 @@
             </label>
           </div>
           <p id="register-error" class="form-error" role="alert"></p>
+          <p class="auth-note">アカウント情報の取扱いと公開範囲は <a class="policy-link" href="privacy.html" target="_blank" rel="noopener">プライバシーポリシー</a> をご確認ください。</p>
           <div class="auth-actions">
             <button type="submit" id="register-submit" class="button-primary">アカウントを作成してログイン</button>
           </div>
@@ -341,13 +343,13 @@
       <div class="breadcrumb">
         <span>COMMUNITY</span>
         <span aria-hidden="true">/</span>
-        <span id="breadcrumb-category">読み込み中</span>
+        <span id="breadcrumb-category">掲示板</span>
       </div>
 
       <div class="category-heading">
         <div>
           <div class="eyebrow">COMMUNITY BOARD</div>
-          <h1 id="category-title">掲示板を読み込み中...</h1>
+          <h1 id="category-title"></h1>
         </div>
         <span class="category-caption">スレッドを選択して会話に参加できます。</span>
       </div>
@@ -368,12 +370,13 @@
             <span id="thread-label">THREAD 01</span>
           </div>
           <div class="thread-title-row">
-            <h2 id="thread-title">読み込み中...</h2>
+            <h2 id="thread-title"></h2>
             <button type="button" class="refresh-button" id="reload-thread" title="最新の投稿を再取得">↻ 更新</button>
           </div>
         </div>
 
         <div id="error-banner" class="error-banner" role="alert" hidden></div>
+        <p id="initial-loading-status" class="initial-loading-status" role="status" aria-live="polite" hidden>掲示板を読み込み中...</p>
 
         <!-- ③ ピン留めされた通常投稿・返信ツリー（該当投稿がある時のみ表示） -->
         <section id="pinned-section" class="pinned-section" aria-labelledby="pinned-heading" hidden>
@@ -409,6 +412,7 @@
         <span>COMMUNITY <b>BOARD</b></span>
         <p>誰もが読みやすく参加しやすい汎用掲示板（v0.5 MVP）</p>
         <button type="button" class="footer-guide" id="footer-guide">使い方</button>
+        <a class="footer-guide" href="privacy.html">プライバシーポリシー</a>
         <span class="footer-version">EDITION v0.5</span>
         <small class="footer-copy">© 2026 KoohiQK</small>
       </footer>
@@ -480,7 +484,7 @@
       <textarea id="comment-body" rows="4" maxlength="2000" placeholder="本文を入力してください（必須・2,000文字以内）" required></textarea>
 
       <p id="form-error" class="form-error" role="alert"></p>
-      <p class="form-note">日替わりIDが自動付与されます。個人情報や秘密情報は入力しないでください。</p>
+      <p class="form-note">日替わりIDが自動付与されます。個人情報や秘密情報は入力しないでください（<a class="policy-link" href="privacy.html" target="_blank" rel="noopener">プライバシーポリシー</a>）。</p>
       <p class="form-note">下書きはスレッドごとに、このページを開いている間だけ保持します。再読み込みすると消えます。</p>
     </form>
   </aside>

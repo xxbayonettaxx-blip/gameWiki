@@ -404,8 +404,23 @@ function createApp(options = {}) {
   }
 
   // -------------------------------------------------------------------
-  // 6. 静的ファイル配信処理（パストラバーサル・非公開ファイル完全遮断）
+  // 6. 静的ファイル配信処理（パストラバーサル・非公開ファイル完全遮断・ETag/304対応）
   // -------------------------------------------------------------------
+  function matchesIfNoneMatch(headerValue, etag) {
+    if (typeof headerValue !== 'string' || headerValue.trim() === '') {
+      return false;
+    }
+    const trimmed = headerValue.trim();
+    if (trimmed === '*') {
+      return true;
+    }
+    const candidates = trimmed.split(',').map((item) => item.trim());
+    return candidates.some((tag) => {
+      const normalized = tag.startsWith('W/') ? tag.slice(2).trim() : tag;
+      return normalized === etag;
+    });
+  }
+
   function serveStatic(req, res, pathname) {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       sendJson(res, 405, { error: '許可されていないHTTPメソッドです。' }, { Allow: 'GET, HEAD' });
@@ -488,11 +503,23 @@ function createApp(options = {}) {
     }
 
     const fileBuffer = fs.readFileSync(realCandidatePath);
+    const etag = `"${crypto.createHash('sha256').update(fileBuffer).digest('base64url').slice(0, 24)}"`;
     setSecurityHeaders(res);
+
+    if (matchesIfNoneMatch(req.headers['if-none-match'], etag)) {
+      res.writeHead(304, {
+        ETag: etag,
+        'Cache-Control': 'no-cache',
+      });
+      res.end();
+      return;
+    }
+
     res.writeHead(200, {
       'Content-Type': contentType,
       'Content-Length': fileBuffer.length,
       'Cache-Control': 'no-cache',
+      ETag: etag,
     });
 
     if (req.method === 'HEAD') {
@@ -533,6 +560,48 @@ function createApp(options = {}) {
           return;
         }
         sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      // [GET] 初回描画用まとめ取得（認証状態＋カテゴリ・スレッド一覧＋初期スレッド詳細を1往復で返す）
+      if (pathname === '/api/bootstrap') {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const rawThreadId = parsedUrl.searchParams.get('threadId');
+        const requestedThreadId =
+          rawThreadId !== null && rawThreadId !== ''
+            ? parsePositiveInt(rawThreadId, 'スレッドID')
+            : null;
+
+        const nowDate = nowFn();
+        const nowIso = nowDate.toISOString();
+        purgeExpiredSessionsIfDue(nowDate.getTime(), nowIso);
+        const sess = resolveRequestSession(req, nowIso);
+        const extraHeaders = sess.status === 'invalid' ? buildClearCookieHeaders() : {};
+        const user = sess.status === 'valid' ? sess.auth.user : null;
+
+        const categories = db.listCategoriesWithThreads();
+        let targetThreadId = null;
+        if (requestedThreadId !== null) {
+          for (const cat of categories) {
+            if ((cat.threads || []).some((t) => t.id === requestedThreadId)) {
+              targetThreadId = requestedThreadId;
+              break;
+            }
+          }
+        }
+        if (targetThreadId === null) {
+          for (const cat of categories) {
+            if ((cat.threads || []).length > 0) {
+              targetThreadId = cat.threads[0].id;
+              break;
+            }
+          }
+        }
+        const initialThread = targetThreadId !== null ? db.getThreadDetail(targetThreadId) : null;
+        sendJson(res, 200, { user, categories, initialThread }, extraHeaders);
         return;
       }
 

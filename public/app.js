@@ -865,6 +865,25 @@
     syncReplyingTargetHighlight();
   }
 
+  function syncThreadSummaryFromPosts(category, threadData, posts) {
+    if (!category || !threadData) return;
+    const tSummary = (category.threads || []).find((t) => t.id === threadData.id);
+    if (!tSummary) return;
+    tSummary.post_count = posts.length;
+    // 最新の未削除投稿日時（0件時はスレッド作成日時）を同期し、投稿直後や更新時にNEW表示を即時反映する
+    let latestAt = threadData.created_at || tSummary.latest_post_at || null;
+    let latestMs = latestAt ? Date.parse(latestAt) : NaN;
+    for (const p of posts) {
+      if (p.is_deleted || !p.created_at) continue;
+      const ms = Date.parse(p.created_at);
+      if (!Number.isNaN(ms) && (Number.isNaN(latestMs) || ms > latestMs)) {
+        latestMs = ms;
+        latestAt = p.created_at;
+      }
+    }
+    if (latestAt) tSummary.latest_post_at = latestAt;
+  }
+
   function syncHeaders() {
     if (!state.activeCategory) return;
     $('#breadcrumb-category').textContent = state.activeCategory.name;
@@ -877,7 +896,7 @@
 
     if (state.activeThreadData) {
       $('#thread-title').textContent = state.activeThreadData.title;
-    } else {
+    } else if (state.loadingThreadId === null) {
       $('#thread-title').textContent = 'スレッドがありません';
       $('#thread-label').textContent = 'THREAD --';
     }
@@ -885,7 +904,7 @@
   }
 
   // -------------------------------------------------------------------
-  // 7. API通信：カテゴリ取得 ＆ スレッド詳細取得（F1: 確定IDと要求中IDの分離）
+  // 7. API通信：まとめ取得(/api/bootstrap) ＆ スレッド詳細取得（F1対応）
   // -------------------------------------------------------------------
   function getThreadIdFromHash() {
     const hash = window.location.hash || '';
@@ -895,40 +914,93 @@
 
   async function loadInitialData() {
     showErrorBanner('');
+    const loadingStatusEl = $('#initial-loading-status');
+    let loadingTimer = null;
+    if (loadingStatusEl) {
+      loadingStatusEl.hidden = true;
+      // 180ms以上の通信待ちが発生した場合のみ読み込み表示を出し、通常速度時のチラつきを抑える
+      loadingTimer = setTimeout(() => {
+        loadingStatusEl.hidden = false;
+      }, 180);
+    }
+
     try {
-      const res = await fetch('api/categories', { headers: { Accept: 'application/json' } });
+      const hashThreadId = getThreadIdFromHash();
+      const bootstrapUrl =
+        hashThreadId && Number.isSafeInteger(hashThreadId) && hashThreadId >= 1
+          ? `api/bootstrap?threadId=${encodeURIComponent(String(hashThreadId))}`
+          : 'api/bootstrap';
+
+      const res = await fetch(bootstrapUrl, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
+      state.user = data.user || null;
+      syncAuthUI();
+
       state.categories = Array.isArray(data.categories) ? data.categories : [];
       if (state.categories.length === 0) {
+        state.activeCategory = null;
+        state.activeThreadId = null;
+        state.activeThreadData = null;
+        state.posts = [];
+        $('#breadcrumb-category').textContent = '掲示板';
         $('#category-title').textContent = 'カテゴリがありません';
+        $('#thread-title').textContent = 'スレッドがありません';
+        $('#thread-label').textContent = 'THREAD --';
+        renderNavigation();
+        renderAllPosts();
         syncSubmitAvailability();
         return;
       }
 
-      // URLハッシュ（#thread-X）があれば該当スレッドを優先復元し、なければ先頭スレッドを開く
-      const hashThreadId = getThreadIdFromHash();
-      const initialMeta = hashThreadId ? findThreadMeta(hashThreadId) : null;
+      const initialThreadDetail = data.initialThread || null;
+      if (initialThreadDetail && initialThreadDetail.thread) {
+        const confirmedMeta = findThreadMeta(initialThreadDetail.thread.id);
+        state.activeCategory = confirmedMeta ? confirmedMeta.category : state.categories[0];
+        state.activeThreadId = initialThreadDetail.thread.id;
+        state.activeThreadData = initialThreadDetail.thread;
+        state.loadingThreadId = null;
+        state.failedTargetThread = null;
+        state.posts = Array.isArray(initialThreadDetail.posts) ? initialThreadDetail.posts : [];
 
-      if (initialMeta) {
-        state.activeCategory = initialMeta.category;
+        syncThreadSummaryFromPosts(
+          state.activeCategory,
+          state.activeThreadData,
+          state.posts
+        );
+
+        const threadHash = `#thread-${state.activeThreadId}`;
+        if (window.location.hash !== threadHash) {
+          history.replaceState(null, '', threadHash);
+        }
       } else {
         state.activeCategory = state.categories[0];
+        state.activeThreadId = null;
+        state.activeThreadData = null;
+        state.loadingThreadId = null;
+        state.failedTargetThread = null;
+        state.posts = [];
       }
 
-      const targetThread = initialMeta ? initialMeta.thread : state.activeCategory.threads?.[0];
       renderNavigation();
       syncHeaders();
-
-      if (targetThread) {
-        await loadThread(targetThread.id);
-      } else {
-        syncSubmitAvailability();
-      }
+      renderAllPosts();
     } catch (err) {
+      $('#breadcrumb-category').textContent = '通信エラー';
+      $('#category-title').textContent = '掲示板を読み込めませんでした';
+      $('#thread-category-tag').textContent = '-';
+      $('#thread-label').textContent = 'THREAD --';
+      $('#thread-title').textContent = '再読み込みをお試しください';
       showErrorBanner(err.message || 'サーバーとの通信に失敗しました。');
       syncSubmitAvailability();
+    } finally {
+      clearTimeout(loadingTimer);
+      if (loadingStatusEl) loadingStatusEl.hidden = true;
     }
   }
 
@@ -1011,22 +1083,7 @@
       }
 
       if (state.activeCategory) {
-        const tSummary = state.activeCategory.threads.find((t) => t.id === data.thread.id);
-        if (tSummary) {
-          tSummary.post_count = state.posts.length;
-          // 最新の未削除投稿日時（0件時はスレッド作成日時）を同期し、投稿直後や更新時にNEW表示を即時反映する
-          let latestAt = data.thread.created_at || tSummary.latest_post_at || null;
-          let latestMs = latestAt ? Date.parse(latestAt) : NaN;
-          for (const p of state.posts) {
-            if (p.is_deleted || !p.created_at) continue;
-            const ms = Date.parse(p.created_at);
-            if (!Number.isNaN(ms) && (Number.isNaN(latestMs) || ms > latestMs)) {
-              latestMs = ms;
-              latestAt = p.created_at;
-            }
-          }
-          if (latestAt) tSummary.latest_post_at = latestAt;
-        }
+        syncThreadSummaryFromPosts(state.activeCategory, data.thread, state.posts);
       }
 
       renderNavigation();
@@ -1297,11 +1354,13 @@
       $('#comment-body').focus();
     });
 
-    // 「↻ 更新」は直近で失敗したスレッドがあればその再取得、なければ現在表示中のスレッドを再取得
+    // 「↻ 更新」は直近で失敗したスレッド・表示中スレッドを再取得（初回読込失敗時はbootstrap再実行）
     $('#reload-thread').addEventListener('click', () => {
       const targetId = state.failedTargetThread ? state.failedTargetThread.id : state.activeThreadId;
       if (targetId !== null) {
         loadThread(targetId, { preserveFocusSelector: '#reload-thread' });
+      } else {
+        loadInitialData();
       }
     });
     $('#sort').addEventListener('change', renderAllPosts);
@@ -1636,7 +1695,7 @@
 
         const focusables = [
           ...activePanel.querySelectorAll(
-            'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+            'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
           ),
         ].filter((node) => !node.closest('[hidden]'));
 
@@ -1659,6 +1718,5 @@
 
   loadPreferences();
   initEvents();
-  fetchCurrentUser();
   loadInitialData();
 })();

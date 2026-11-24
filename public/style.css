@@ -843,6 +843,7 @@ legend {
 .category-heading h1 {
   font-size: 22px;
   line-height: 1.45;
+  min-height: 1.45em;
   letter-spacing: 0.04em;
   font-weight: 750;
 }
@@ -998,6 +999,7 @@ legend {
   letter-spacing: 0.02em;
   font-weight: 750;
   line-height: 1.45;
+  min-height: 1.45em;
 }
 
 .refresh-button {
@@ -1024,6 +1026,14 @@ legend {
   border: 1px solid var(--danger-line);
   font-size: 12px;
   font-weight: 600;
+}
+
+.initial-loading-status {
+  margin-top: 16px;
+  padding: 18px 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
 }
 
 /* ③ ピン留めされた通常投稿・返信ツリー */
@@ -1412,11 +1422,19 @@ body.no-comment-bg .is-replying-target > .comment .comment-text {
   width: 100%;
 }
 .footer-guide {
+  display: inline-flex;
+  align-items: center;
   font-size: 11px;
   color: var(--accent-ink);
   text-decoration: underline;
   text-underline-offset: 3px;
   min-height: 32px;
+}
+.policy-link {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  font-weight: 600;
 }
 .footer-version {
   font: 8.5px Arial, sans-serif;
@@ -2147,6 +2165,171 @@ dialog::backdrop {
     color: var(--muted);
     padding-bottom: 6px;
     white-space: nowrap;
+  }
+}
+
+/* ---------------------------------------------------------------------
+ * 10. プライバシーポリシーページ（public/privacy.html 用・5テーマ/狭幅対応）
+ * --------------------------------------------------------------------- */
+body.privacy-page {
+  padding-bottom: 24px;
+}
+
+.privacy-page .brand {
+  min-width: 0;
+}
+.privacy-page .brand strong {
+  font-size: 13px;
+  letter-spacing: 0.5px;
+}
+
+.privacy-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f5fc;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.privacy-back:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: #b8acf3;
+}
+
+.privacy-main {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 18px 14px 32px;
+  outline: none;
+}
+
+.privacy-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 20px 16px;
+}
+.privacy-card h1 {
+  font-size: clamp(19px, 3.2vw, 26px);
+  line-height: 1.4;
+  margin-bottom: 16px;
+}
+
+.privacy-meta {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 22px;
+  padding: 14px;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.privacy-meta > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.privacy-meta dt {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.privacy-meta dd {
+  margin: 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.privacy-card section {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.privacy-card h2 {
+  font-size: 16px;
+  font-weight: 750;
+  margin-bottom: 10px;
+  color: var(--ink);
+}
+.privacy-card p,
+.privacy-card li {
+  font-size: var(--body-size);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.privacy-card p + p {
+  margin-top: 10px;
+}
+.privacy-card ul,
+.privacy-card ol {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.privacy-card code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.privacy-table-wrap {
+  margin-top: 12px;
+  overflow-x: auto;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.privacy-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+.privacy-table th,
+.privacy-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.privacy-table th {
+  background: var(--surface-alt);
+  font-weight: 700;
+  width: 34%;
+}
+.privacy-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.privacy-card .page-footer {
+  margin-top: 26px;
+  padding-bottom: 0;
+  border-top: 1px solid var(--line);
+}
+
+@media (min-width: 760px) {
+  .privacy-page .brand strong {
+    font-size: 18.5px;
+    letter-spacing: 1.2px;
+  }
+  .privacy-main {
+    padding: 30px 32px 48px;
+  }
+  .privacy-card {
+    padding: 32px 36px;
   }
 }
 

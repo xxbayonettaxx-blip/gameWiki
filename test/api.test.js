@@ -1294,3 +1294,103 @@ test('レビュー回帰(F2/F3/F4): CLI秘密候補非エコー・非BMP会員�
   );
   assert.equal(expiredPwRes.status, 401);
 });
+
+test('Phase 1(T1-1/T1-2/T2-1): /api/bootstrap まとめ取得・静的ETag(304)・privacy.html配信と非公開保護', async (t) => {
+  const fastScryptQueue = createScryptQueue({ scryptFn: makeFastScryptFn() });
+  const nowRef = { value: new Date('2026-11-24T05:00:00.000Z') };
+  const ctx = await startTestServer({
+    scryptQueue: fastScryptQueue,
+    devInsecureCookie: true,
+    nowFn: () => nowRef.value,
+  });
+  t.after(() => ctx.stop());
+
+  // 1. 初回 GET /api/bootstrap（デフォルト先頭スレッド）
+  const bootDefault = await fetch(`${ctx.baseUrl}/api/bootstrap`);
+  assert.equal(bootDefault.status, 200);
+  assert.equal(bootDefault.headers.get('cache-control'), 'no-store');
+  assert.equal(bootDefault.headers.get('etag'), null);
+  const bootData = await bootDefault.json();
+  assert.equal(bootData.user, null);
+  assert.equal(bootData.categories.length, 3);
+  assert.equal(bootData.initialThread.thread.id, 1);
+  assert.ok(Array.isArray(bootData.initialThread.posts) && bootData.initialThread.posts.length >= 1);
+
+  // 2. ?threadId=2 指定および /board/ サブパス互換
+  const bootT2 = await fetch(`${ctx.baseUrl}/board/api/bootstrap?threadId=2`);
+  assert.equal(bootT2.status, 200);
+  const bootT2Data = await bootT2.json();
+  assert.equal(bootT2Data.initialThread.thread.id, 2);
+  assert.equal(bootT2Data.initialThread.thread.title, '質問、初心者質問');
+
+  // 3. 存在しない正の threadId は先頭スレッドへフォールバック、不正形式は 400、POST は 405
+  const bootFallback = await fetch(`${ctx.baseUrl}/api/bootstrap?threadId=999999`);
+  assert.equal(bootFallback.status, 200);
+  assert.equal((await bootFallback.json()).initialThread.thread.id, 1);
+
+  assert.equal((await fetch(`${ctx.baseUrl}/api/bootstrap?threadId=abc`)).status, 400);
+  assert.equal((await fetch(`${ctx.baseUrl}/api/bootstrap?threadId=0`)).status, 400);
+
+  const bootPost = await fetch(`${ctx.baseUrl}/api/bootstrap`, { method: 'POST' });
+  assert.equal(bootPost.status, 405);
+  assert.ok(bootPost.headers.get('allow')?.includes('GET'));
+
+  // 4. 有効Cookie時は user を返し、無効Cookie時は Clear-Cookie と user:null を返す
+  const regRes = await fetch(`${ctx.baseUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: ctx.baseUrl },
+    body: JSON.stringify({ username: 'boot_member', password: 'boot-pass-1234' }),
+  });
+  assert.equal(regRes.status, 201);
+  const cookiePair = extractSetCookiePair(regRes);
+
+  const bootAuthed = await fetch(`${ctx.baseUrl}/api/bootstrap`, {
+    headers: { Cookie: cookiePair },
+  });
+  assert.equal(bootAuthed.status, 200);
+  const bootAuthedData = await bootAuthed.json();
+  assert.equal(bootAuthedData.user.username, 'boot_member');
+  assert.equal(bootAuthedData.initialThread.thread.id, 1);
+
+  const bootInvalidCookie = await fetch(`${ctx.baseUrl}/api/bootstrap`, {
+    headers: { Cookie: `${DEV_SESSION_COOKIE_NAME}=invalid-token-format` },
+  });
+  assert.equal(bootInvalidCookie.status, 200);
+  assert.ok(bootInvalidCookie.headers.get('set-cookie')?.includes('Max-Age=0'));
+  assert.equal((await bootInvalidCookie.json()).user, null);
+
+  // 5. 静的ファイル ETag / 304 Not Modified と privacy.html 公開境界
+  for (const staticPath of ['/style.css', '/app.js', '/privacy.html', '/privacy.js']) {
+    const first = await fetch(`${ctx.baseUrl}${staticPath}`);
+    assert.equal(first.status, 200, `${staticPath} should return 200`);
+    const etag = first.headers.get('etag');
+    assert.ok(etag && etag.startsWith('"'), `${staticPath} should return ETag`);
+    assert.equal(first.headers.get('cache-control'), 'no-cache');
+    assert.ok(first.headers.get('content-security-policy')?.includes("script-src 'self'"));
+
+    const cached = await fetch(`${ctx.baseUrl}${staticPath}`, {
+      headers: { 'If-None-Match': etag },
+    });
+    assert.equal(cached.status, 304);
+    assert.equal(cached.headers.get('etag'), etag);
+    assert.equal(cached.headers.get('cache-control'), 'no-cache');
+    assert.equal(await cached.text(), '');
+
+    const weakMatch = await fetch(`${ctx.baseUrl}${staticPath}`, {
+      headers: { 'If-None-Match': `"other", W/${etag}` },
+    });
+    assert.equal(weakMatch.status, 304);
+
+    const stale = await fetch(`${ctx.baseUrl}${staticPath}`, {
+      headers: { 'If-None-Match': '"stale-etag-value"' },
+    });
+    assert.equal(stale.status, 200);
+  }
+
+  const privacyHtml = await (await fetch(`${ctx.baseUrl}/privacy.html`)).text();
+  assert.ok(privacyHtml.includes('UNLOCKの掲示板'));
+  assert.ok(privacyHtml.includes('KoohiQK'));
+  for (const forbidden of ['/var/www', '/etc/', 'board_backup.db', 'access_stats.db', '【']) {
+    assert.equal(privacyHtml.includes(forbidden), false, `privacy.html must not contain ${forbidden}`);
+  }
+});

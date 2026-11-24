@@ -29,7 +29,35 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
   let holdPostResponse = false;
   let finishPost = null;
   let failThread = null;
+  let bootstrapDelayMs = 0;
+  let failBootstrapStatus = 0;
+  let seenBootApiCalls = [];
   server.prependListener('request', (req, res) => {
+    if (
+      req.url.startsWith('/board/api/bootstrap') ||
+      req.url.startsWith('/board/api/categories') ||
+      req.url.startsWith('/board/api/threads/') ||
+      req.url.startsWith('/board/api/auth/me')
+    ) {
+      seenBootApiCalls.push(req.url);
+    }
+    if (req.url.startsWith('/board/api/bootstrap')) {
+      if (failBootstrapStatus) {
+        const statusToSend = failBootstrapStatus;
+        const origWriteHead = res.writeHead;
+        res.writeHead = function (status, ...args) {
+          return origWriteHead.call(res, statusToSend, ...args);
+        };
+      }
+      if (bootstrapDelayMs > 0) {
+        const delayMs = bootstrapDelayMs;
+        const origEnd = res.end;
+        res.end = function (...args) {
+          setTimeout(() => origEnd.apply(res, args), delayMs);
+          return res;
+        };
+      }
+    }
     if (req.url === '/board/api/posts' && holdPostResponse) {
       const originalEnd = res.end;
       res.end = function (...args) {
@@ -502,6 +530,76 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await send('Page.navigate', { url: url + '?reviewEmojiReload=1#thread-1' });
     await waitFor(`document.querySelector('#auth-open-label')?.textContent === ${JSON.stringify(emojiUser)} && document.body.textContent.includes('絵文字名での会員投稿本文')`);
     assert.ok(await evaluate("document.querySelectorAll('.member-badge').length >= 1"));
+  });
+
+  await t.test('Phase 1(T1/T2): bootstrap 1往復・遅延ローディング・503復旧・privacy.html導線と狭幅表示', async () => {
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+    // 1. 通常速度の初回表示では api/bootstrap のみ1往復で完了し、#initial-loading-status は出ない
+    seenBootApiCalls = [];
+    bootstrapDelayMs = 0;
+    failBootstrapStatus = 0;
+    await send('Page.navigate', { url: url + '?phase1Fast=1#thread-1' });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+    assert.deepEqual(seenBootApiCalls, ['/board/api/bootstrap?threadId=1']);
+    assert.equal(await evaluate("document.querySelector('#initial-loading-status')?.hidden"), true);
+
+    // 2. フッター・登録フォーム・投稿フォームにプライバシーポリシー導線が存在すること
+    const linkState = await evaluate(`({
+      footer: document.querySelector('.page-footer a[href="privacy.html"]')?.getAttribute('href') || null,
+      register: document.querySelector('#register-form a[href="privacy.html"]')?.getAttribute('href') || null,
+      composer: document.querySelector('#comment-form a[href="privacy.html"]')?.getAttribute('href') || null,
+    })`);
+    assert.deepEqual(linkState, {
+      footer: 'privacy.html',
+      register: 'privacy.html',
+      composer: 'privacy.html',
+    });
+
+    // 3. 180ms超の遅延発生時のみ #initial-loading-status が表示され、完了後に非表示へ戻ること
+    bootstrapDelayMs = 450;
+    await send('Page.navigate', { url: url + '?phase1Slow=1#thread-1' });
+    await waitFor("document.querySelector('#initial-loading-status') && document.querySelector('#initial-loading-status').hidden === false");
+    bootstrapDelayMs = 0;
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談' && document.querySelector('#initial-loading-status').hidden === true");
+
+    // 4. 初回 503 失敗時に「読み込み中」のまま残らず、更新ボタンで正常復旧すること
+    failBootstrapStatus = 503;
+    await send('Page.navigate', { url: url + '?phase1Fail=1#thread-1' });
+    await waitFor("document.querySelector('#error-banner')?.hidden === false");
+    const errState = await evaluate(`({
+      cat: document.querySelector('#category-title')?.textContent,
+      thread: document.querySelector('#thread-title')?.textContent,
+      loadingHidden: document.querySelector('#initial-loading-status')?.hidden,
+    })`);
+    assert.equal(errState.cat, '掲示板を読み込めませんでした');
+    assert.equal(errState.loadingHidden, true);
+    assert.ok(!String(errState.thread || '').includes('読み込み中'));
+
+    failBootstrapStatus = 0;
+    await click('#reload-thread');
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談' && document.querySelector('#error-banner')?.hidden === true");
+
+    // 5. dark テーマ保存状態で privacy.html を開き、テーマ継承と 1280px/320px で横はみ出しゼロを確認
+    await evaluate(`localStorage.setItem('community-board-prefs-v1', JSON.stringify({ theme: 'dark', font: 18, background: true }))`);
+    await send('Page.navigate', { url: url + 'privacy.html' });
+    await waitFor("document.querySelector('h1')?.textContent.includes('プライバシーポリシー')");
+    const desktopPrivacy = await evaluate(`({
+      theme: document.documentElement.dataset.theme,
+      font: document.documentElement.dataset.font,
+      clientW: document.documentElement.clientWidth,
+      scrollW: document.documentElement.scrollWidth,
+    })`);
+    assert.equal(desktopPrivacy.theme, 'dark');
+    assert.equal(desktopPrivacy.font, '18');
+    assert.ok(desktopPrivacy.scrollW <= desktopPrivacy.clientW, JSON.stringify(desktopPrivacy));
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 480, deviceScaleFactor: 1, mobile: true });
+    const mobilePrivacy = await evaluate(`({
+      clientW: document.documentElement.clientWidth,
+      scrollW: document.documentElement.scrollWidth,
+    })`);
+    assert.ok(mobilePrivacy.scrollW <= mobilePrivacy.clientW, JSON.stringify(mobilePrivacy));
   });
 
   if (process.env.FRONTEND_ARTIFACT_DIR) {
