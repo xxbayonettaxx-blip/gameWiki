@@ -24,6 +24,9 @@
   --muted: #5b6578;
   --line: #e1e5ec;
   --control-border: #7c879b;
+  --close-bg: #e5e8f0;
+  --close-border: #475569;
+  --close-ink: #1e2433;
   --focus-ring: #51449f;
   --placeholder: #5b6578;
   --accent: #6154b4;
@@ -58,6 +61,9 @@
   --muted: #adb7cb;
   --line: #3b4458;
   --control-border: #7e8aa3;
+  --close-bg: #363e52;
+  --close-border: #b8c2d8;
+  --close-ink: #ffffff;
   --focus-ring: #d3caff;
   --placeholder: #adb7cb;
   --accent: #b8acf9;
@@ -92,6 +98,9 @@
   --muted: #675e50;
   --line: #ded6c7;
   --control-border: #867b6a;
+  --close-bg: #e8e0d0;
+  --close-border: #5c5346;
+  --close-ink: #26221c;
   --focus-ring: #5f4a2b;
   --placeholder: #675e50;
   --accent: #78623e;
@@ -126,6 +135,9 @@
   --muted: #4a5568;
   --line: #94a3b8;
   --control-border: #64748b;
+  --close-bg: #dbe4ee;
+  --close-border: #334155;
+  --close-ink: #0f172a;
   --focus-ring: #005585;
   --placeholder: #4a5568;
   --accent: #0072b2;
@@ -160,6 +172,9 @@
   --muted: #cbd5e1;
   --line: #64748b;
   --control-border: #8292a8;
+  --close-bg: #363c48;
+  --close-border: #cbd5e1;
+  --close-ink: #ffffff;
   --focus-ring: #8cd2f8;
   --placeholder: #cbd5e1;
   --accent: #56b4e9;
@@ -775,7 +790,7 @@ svg.icon {
   border-radius: 50%;
   font-size: 22px;
   line-height: 1;
-  color: var(--muted);
+  color: var(--ink);
   background: var(--surface-alt);
   border: 1px solid var(--control-border);
 }
@@ -1756,31 +1771,42 @@ body.composer-open .fab-write {
   border-bottom: 1px solid var(--line);
 }
 
-/* ★ キャンセル／閉じるボタン：押しやすい背景・枠線・ホバーフィードバックで目立たせる */
+/* ★ キャンセル／閉じるボタン：入力欄と明確に見分けられる高コントラスト背景・太枠で目立たせる */
 #composer-close {
-  min-width: 36px;
-  min-height: 36px;
-  border-radius: 8px;
-  background: var(--surface-alt);
-  border: 1.5px solid var(--control-border);
-  color: var(--ink);
-  font-size: 20px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  border-radius: 10px;
+  background: var(--close-bg);
+  border: 2px solid var(--close-border);
+  color: var(--close-ink);
+  font-size: 22px;
   font-weight: 700;
   line-height: 1;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.14);
+  flex-shrink: 0;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.composer-close-glyph {
+  font-size: 20px;
+  line-height: 1;
+}
+.composer-close-label {
+  display: none;
 }
 #composer-close:hover {
   background: var(--danger-bg);
   border-color: var(--danger-line);
   color: var(--danger-ink);
-  transform: scale(1.04);
+  transform: translateY(-1px);
 }
 #composer-close:active {
-  transform: scale(0.96);
+  transform: translateY(0);
 }
 
 .drawer-title-group {
@@ -2333,7 +2359,7 @@ dialog::backdrop {
     bottom: 28px;
   }
 
-  /* ★ PC時の投稿ドロワー：右側スライドイン時も外側クリックで閉じられるようにする（背景は透明） */
+  /* ★ PC時の投稿ドロワー：非モーダル（背景操作可・閉じるボタン/Escで閉じる） */
   .drawer-backdrop {
     display: block;
   }
@@ -2360,6 +2386,20 @@ dialog::backdrop {
     transform: translateX(0);
     visibility: visible;
     transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
+  }
+
+  #composer-close {
+    min-width: auto;
+    min-height: 40px;
+    padding: 0 12px;
+  }
+
+  .composer-close-label {
+    display: inline;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
   }
 
   .drawer-form textarea {

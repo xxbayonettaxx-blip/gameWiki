@@ -252,11 +252,23 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       drawer.scrollTop = drawer.scrollHeight;
       const bounds = drawer.getBoundingClientRect();
       const button = document.querySelector('#submit-button').getBoundingClientRect();
-      return { width: drawer.clientWidth, scrollWidth: drawer.scrollWidth, height: drawer.clientHeight, scrollHeight: drawer.scrollHeight, top: button.top, bottom: button.bottom, drawerTop: bounds.top, drawerBottom: bounds.bottom };
+      const closeLabel = document.querySelector('.composer-close-label');
+      return {
+        width: drawer.clientWidth,
+        scrollWidth: drawer.scrollWidth,
+        height: drawer.clientHeight,
+        scrollHeight: drawer.scrollHeight,
+        top: button.top,
+        bottom: button.bottom,
+        drawerTop: bounds.top,
+        drawerBottom: bounds.bottom,
+        closeLabelDisplay: closeLabel ? getComputedStyle(closeLabel).display : null,
+      };
     })()`);
     assert.ok(metrics.scrollWidth <= metrics.width, JSON.stringify(metrics));
     assert.ok(metrics.scrollHeight > metrics.height, JSON.stringify(metrics));
     assert.ok(metrics.top >= metrics.drawerTop && metrics.bottom <= metrics.drawerBottom, JSON.stringify(metrics));
+    assert.equal(metrics.closeLabelDisplay, 'none', JSON.stringify(metrics));
     await click('#composer-close');
     await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
     await switchThread(2, '質問、初心者質問');
@@ -819,6 +831,9 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         const pinLabel = document.querySelector('.pin-label');
         const bodyInput = document.querySelector('#comment-body');
         const drawer = document.querySelector('#composer-drawer');
+        const drawerHeader = document.querySelector('.drawer-header');
+        const closeBtn = document.querySelector('#composer-close');
+        const closeLabel = document.querySelector('.composer-close-label');
         const header = document.querySelector('.masthead');
 
         const newCs = getComputedStyle(newBadge);
@@ -827,6 +842,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         const bodyCs = getComputedStyle(bodyInput);
         const phCs = getComputedStyle(bodyInput, '::placeholder');
         const drawerCs = getComputedStyle(drawer);
+        const closeCs = getComputedStyle(closeBtn);
         const headerCs = getComputedStyle(header);
 
         out[theme] = {
@@ -835,6 +851,11 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
           pinOpacity: pinLabel ? getComputedStyle(pinLabel).opacity : 'missing',
           placeholderRatio: ratio(phCs.color, bodyCs.backgroundColor),
           borderRatio: ratio(bodyCs.borderTopColor, drawerCs.backgroundColor),
+          closeTextRatio: ratio(closeCs.color, closeCs.backgroundColor),
+          closeBorderRatio: ratio(closeCs.borderTopColor, drawerCs.backgroundColor),
+          closeBgDistinct: closeCs.backgroundColor !== bodyCs.backgroundColor,
+          closeLabelDisplay: closeLabel ? getComputedStyle(closeLabel).display : null,
+          drawerHeaderFits: Boolean(drawerHeader && drawerHeader.scrollWidth <= drawerHeader.clientWidth),
           btnHoverRatio: ratio(rootCs.getPropertyValue('--accent-fg'), rootCs.getPropertyValue('--accent-hover')),
           headerBorderTop: headerCs.borderTopColor,
         };
@@ -850,6 +871,11 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       assert.equal(metrics.pinOpacity, '1', `${theme} pinOpacity=${metrics.pinOpacity}`);
       assert.ok(metrics.placeholderRatio >= 4.5, `${theme} placeholderRatio=${metrics.placeholderRatio}`);
       assert.ok(metrics.borderRatio >= 3.0, `${theme} borderRatio=${metrics.borderRatio}`);
+      assert.ok(metrics.closeTextRatio >= 7.0, `${theme} closeTextRatio=${metrics.closeTextRatio}`);
+      assert.ok(metrics.closeBorderRatio >= 4.5, `${theme} closeBorderRatio=${metrics.closeBorderRatio}`);
+      assert.equal(metrics.closeBgDistinct, true, `${theme} closeBgDistinct`);
+      assert.notEqual(metrics.closeLabelDisplay, 'none', `${theme} closeLabelDisplay=${metrics.closeLabelDisplay}`);
+      assert.equal(metrics.drawerHeaderFits, true, `${theme} drawerHeaderFits`);
       assert.ok(metrics.btnHoverRatio >= 4.5, `${theme} btnHoverRatio=${metrics.btnHoverRatio}`);
     }
     // R6: paper と ud-light のヘッダー上線が light 固定紫と異なりテーマへ追従していること
