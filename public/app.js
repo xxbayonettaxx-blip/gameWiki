@@ -309,17 +309,28 @@
   function syncAuthUI() {
     const trigger = $('#auth-open');
     const triggerLabel = $('#auth-open-label');
+    const isActiveAdmin = Boolean(
+      state.user && state.user.role === 'admin' && !state.user.mustChangePassword
+    );
     if (trigger && triggerLabel) {
       trigger.classList.toggle('is-logged-in', Boolean(state.user));
+      trigger.classList.toggle('is-admin', isActiveAdmin);
       trigger.classList.toggle('is-must-change', Boolean(state.user?.mustChangePassword));
       if (state.user) {
         triggerLabel.textContent = state.user.mustChangePassword
           ? `${state.user.username}(要変更)`
           : state.user.username;
-        trigger.setAttribute('aria-label', `アカウントメニュー (${state.user.username})`);
+        trigger.setAttribute(
+          'aria-label',
+          isActiveAdmin
+            ? `アカウント・管理メニュー (${state.user.username} / 管理者)`
+            : `アカウントメニュー (${state.user.username})`
+        );
         trigger.title = state.user.mustChangePassword
           ? `${state.user.username}（パスワード変更が必要）`
-          : state.user.username;
+          : isActiveAdmin
+            ? `${state.user.username}（管理者・メニューを開く）`
+            : state.user.username;
       } else {
         triggerLabel.textContent = 'ログイン';
         trigger.setAttribute('aria-label', 'アカウント・ログインを開く');
@@ -342,10 +353,14 @@
           : 'アカウント管理';
       }
       $('#auth-member-name').textContent = state.user.username;
-      $('#auth-member-role').textContent = state.user.role === 'admin' ? '管理者' : '一般会員';
+      const roleEl = $('#auth-member-role');
+      if (roleEl) {
+        roleEl.textContent = state.user.role === 'admin' ? '管理者' : '一般会員';
+        roleEl.classList.toggle('is-admin', isActiveAdmin);
+      }
       const adminLink = $('#admin-page-link');
       if (adminLink) {
-        adminLink.hidden = !(state.user.role === 'admin' && !mustChange);
+        adminLink.hidden = !isActiveAdmin;
       }
       $('#must-change-banner').hidden = !mustChange;
 
@@ -396,6 +411,7 @@
     } else {
       const adminLink = $('#admin-page-link');
       if (adminLink) adminLink.hidden = true;
+      $('#auth-member-role')?.classList.remove('is-admin');
       if (guestPanel) guestPanel.hidden = false;
       if (memberPanel) memberPanel.hidden = true;
       if (titleEl) titleEl.textContent = 'ログイン・新規登録';

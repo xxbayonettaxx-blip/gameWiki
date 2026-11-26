@@ -4,273 +4,152 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="description" content="UNLOCKの掲示板 管理画面 — カテゴリ・スレッド・投稿モデレーション・監査ログ">
+  <meta name="description" content="UNLOCKの掲示板 管理画面 — 概要・カテゴリ/スレッド・投稿モデレーション・会員・監査ログ">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 44'%3E%3Cpath d='M22 4 41 37H31L22 21 13 37H3Z' fill='%23202432'/%3E%3Cpath d='m17 32 5-9 5 9Z' fill='%236154b4'/%3E%3C/svg%3E">
-  <title>管理画面 | UNLOCKの掲示板</title>
-  <link rel="stylesheet" href="style.css">
+  <title>掲示板管理 | UNLOCK</title>
   <link rel="stylesheet" href="admin.css">
+  <script src="admin.js" defer></script>
 </head>
-<body class="admin-page">
-  <a class="skip-link" href="#main">管理本文へ移動</a>
+<body>
+  <a class="skip" href="#main">管理内容へ移動</a>
 
-  <header class="masthead">
-    <div class="masthead-inner">
-      <a class="brand" href="./" aria-label="UNLOCKの掲示板 トップへ">
-        <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 44 44">
-            <path d="M22 4 41 37H31L22 21 13 37H3Z" fill="currentColor"/>
-            <path class="brand-mark-accent" d="m17 32 5-9 5 9Z"/>
-          </svg>
-        </span>
-        <span>
-          <strong>COMMUNITY BOARD</strong>
-          <small>ADMIN CONSOLE v1.1.0</small>
-        </span>
-      </a>
-
-      <div class="header-actions admin-header-actions">
-        <span id="admin-operator-badge" class="admin-operator-badge" hidden></span>
-        <a class="privacy-back" href="./">← 掲示板へ戻る</a>
+  <!-- 非管理者 / 未ログイン時のアクセス遮断ゲート（セッション検証成功まで本体は非表示） -->
+  <section id="admin-auth-gate" class="admin-gate-wrap" aria-labelledby="admin-gate-title">
+    <div class="panel admin-gate-card">
+      <div class="brand gate-brand">
+        <div class="brand-mark" aria-hidden="true">U</div>
+        <div>
+          <strong>UNLOCK</strong>
+          <span>管理コンソール v1.1.0</span>
+        </div>
       </div>
-    </div>
-  </header>
-
-  <main id="main" class="admin-main" tabindex="-1">
-    <div id="admin-error-banner" class="error-banner" role="alert" tabindex="-1" hidden></div>
-
-    <!-- 非管理者 / 未ログイン時のアクセス遮断ゲート -->
-    <section id="admin-auth-gate" class="admin-card admin-gate" aria-labelledby="admin-gate-title">
-      <div class="eyebrow">ACCESS CONTROL</div>
       <h1 id="admin-gate-title">管理画面へのアクセス確認</h1>
       <p id="admin-gate-message" role="status" aria-live="polite">管理者セッションを確認しています...</p>
       <div class="admin-gate-actions">
-        <a class="button-primary admin-link-button" href="./">掲示板へ戻る</a>
+        <a class="btn primary" href="./">← 掲示板へ戻る</a>
       </div>
-    </section>
+    </div>
+  </section>
 
-    <!-- 管理者認証後にのみ展開するワークスペース -->
-    <section id="admin-workspace" class="admin-workspace" aria-label="管理機能ワークスペース" hidden>
-      <div class="admin-title-row">
-        <div>
-          <div class="eyebrow">MANAGEMENT MVP</div>
-          <h1>掲示板 管理コンソール</h1>
-        </div>
-        <button type="button" id="admin-reload-all" class="button-secondary button-small">↻ 全体を再読込</button>
-      </div>
-
-      <!-- サマリー指標カード -->
-      <section class="admin-stats-grid" aria-label="掲示板の全体件数">
-        <div class="admin-stat-box">
-          <span class="admin-stat-label">カテゴリ</span>
-          <strong id="stat-categories">-</strong>
-        </div>
-        <div class="admin-stat-box">
-          <span class="admin-stat-label">スレッド</span>
-          <strong id="stat-threads">-</strong>
-        </div>
-        <div class="admin-stat-box">
-          <span class="admin-stat-label">総投稿数</span>
-          <strong id="stat-posts">-</strong>
-        </div>
-        <div class="admin-stat-box">
-          <span class="admin-stat-label">会員 / 管理者</span>
-          <strong id="stat-users">-</strong>
-        </div>
-      </section>
-
-      <!-- タブバー -->
-      <div class="admin-tabs" role="tablist" aria-label="管理セクション切替">
-        <button
-          type="button"
-          id="tab-btn-structure"
-          class="admin-tab"
-          role="tab"
-          aria-selected="true"
-          aria-controls="panel-structure"
-          tabindex="0"
-          data-tab="structure"
-        >
-          カテゴリ・スレッド管理
-        </button>
-        <button
-          type="button"
-          id="tab-btn-posts"
-          class="admin-tab"
-          role="tab"
-          aria-selected="false"
-          aria-controls="panel-posts"
-          tabindex="-1"
-          data-tab="posts"
-        >
-          投稿モデレーション
-        </button>
-        <button
-          type="button"
-          id="tab-btn-users"
-          class="admin-tab"
-          role="tab"
-          aria-selected="false"
-          aria-controls="panel-users"
-          tabindex="-1"
-          data-tab="users"
-        >
-          ユーザー一覧
-        </button>
-        <button
-          type="button"
-          id="tab-btn-audit"
-          class="admin-tab"
-          role="tab"
-          aria-selected="false"
-          aria-controls="panel-audit"
-          tabindex="-1"
-          data-tab="audit"
-        >
-          監査ログ
-        </button>
+  <!-- 管理者セッション検証後にのみ展開するワークスペース -->
+  <div id="admin-workspace" class="shell" hidden>
+    <aside class="sidebar" aria-label="管理メニュー">
+      <div class="brand">
+        <a class="brand-link" href="./" title="掲示板トップへ戻る">
+          <div class="brand-mark" aria-hidden="true">U</div>
+          <div>
+            <strong>UNLOCK</strong>
+            <span>攻略掲示板</span>
+          </div>
+        </a>
+        <a class="mobile-back-link" href="./">← 掲示板</a>
       </div>
 
-      <!-- 1. カテゴリ・スレッド管理パネル -->
-      <section id="panel-structure" class="admin-panel" role="tabpanel" aria-labelledby="tab-btn-structure">
-        <div class="admin-grid-two">
-          <section class="admin-card" aria-labelledby="cat-form-heading">
-            <h2 id="cat-form-heading">カテゴリを追加</h2>
-            <form id="create-category-form" class="admin-form">
-              <label class="admin-field" for="new-cat-name">
-                <span>カテゴリ名（1〜30文字）</span>
-                <input id="new-cat-name" type="text" maxlength="30" required>
-              </label>
-              <label class="admin-field" for="new-cat-order">
-                <span>表示順（0以上の整数・空欄は末尾追加）</span>
-                <input id="new-cat-order" type="number" min="0" step="1">
-              </label>
-              <button type="submit" id="create-category-submit" class="button-primary button-small">カテゴリを追加</button>
-            </form>
-          </section>
+      <p class="nav-caption">ワークスペース</p>
+      <nav id="navigation" role="tablist" aria-label="管理機能"></nav>
 
-          <section class="admin-card" aria-labelledby="thread-form-heading">
-            <h2 id="thread-form-heading">スレッドを追加</h2>
-            <form id="create-thread-form" class="admin-form">
-              <label class="admin-field" for="new-thread-cat">
-                <span>所属カテゴリ</span>
-                <select id="new-thread-cat" required></select>
-              </label>
-              <label class="admin-field" for="new-thread-title">
-                <span>スレッドタイトル（1〜100文字）</span>
-                <input id="new-thread-title" type="text" maxlength="100" required>
-              </label>
-              <label class="admin-field" for="new-thread-pinned-text">
-                <span>スレッド案内文（スレッド上部に表示・任意・500文字以内）</span>
-                <textarea id="new-thread-pinned-text" rows="2" maxlength="500"></textarea>
-              </label>
-              <div class="admin-inline-fields">
-                <label class="admin-field" for="new-thread-order">
-                  <span>表示順（空欄は末尾）</span>
-                  <input id="new-thread-order" type="number" min="0" step="1">
-                </label>
-                <label class="admin-checkbox-field" for="new-thread-is-pinned">
-                  <input id="new-thread-is-pinned" type="checkbox">
-                  <span>一覧で優先ピン表示</span>
-                </label>
-              </div>
-              <button type="submit" id="create-thread-submit" class="button-primary button-small">スレッドを追加</button>
-            </form>
-          </section>
+      <div class="sidebar-bottom">
+        <button class="presentation-link" type="button" data-action="preferences">
+          <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-settings"/></svg></span>
+          <span>表示設定</span>
+          <span class="icon side-arrow" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-chevron"/></svg></span>
+        </button>
+        <a class="presentation-link" href="./">
+          <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-back"/></svg></span>
+          <span>掲示板へ戻る</span>
+        </a>
+        <div class="demo-note">
+          <span class="demo-dot" aria-hidden="true"></span>
+          <div>
+            <strong>ADMIN CONSOLE v1.1.0</strong>
+            <small>本番API・監査ログ連携中</small>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="top">
+        <div class="crumb">
+          <span>管理画面</span>
+          <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-chevron"/></svg></span>
+          <strong id="crumb-current">概要</strong>
         </div>
 
-        <section class="admin-card" aria-labelledby="structure-list-heading">
-          <h2 id="structure-list-heading">登録済みカテゴリ・スレッド一覧</h2>
-          <p class="admin-help">カテゴリやスレッドの名前・案内文・表示順を変更できます。投稿があるスレッドの物理削除は確認ダイアログでタイトル一致と直前件数を照合します。</p>
-          <div id="structure-list" class="structure-list"></div>
-        </section>
-      </section>
+        <div class="top-actions">
+          <button
+            id="admin-reload-all"
+            class="icon-btn"
+            type="button"
+            title="最新の管理データを再読込"
+            aria-label="最新の管理データを再読込"
+          >
+            <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-refresh"/></svg></span>
+          </button>
+          <button
+            id="admin-theme-toggle"
+            class="icon-btn theme-btn"
+            type="button"
+            data-action="theme"
+            title="テーマを切り替える"
+            aria-label="テーマを切り替える"
+            aria-pressed="false"
+          >
+            <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-moon"/></svg></span>
+          </button>
+          <button
+            class="icon-btn mobile-prefs-btn"
+            type="button"
+            data-action="preferences"
+            title="表示設定"
+            aria-label="表示設定を開く"
+          >
+            <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-settings"/></svg></span>
+          </button>
+          <span class="top-divider" aria-hidden="true"></span>
+          <div id="admin-operator-badge" class="profile" hidden>
+            <span id="admin-operator-avatar" class="avatar" aria-hidden="true">管</span>
+            <div>
+              <strong id="admin-operator-name">-</strong>
+              <small>管理者</small>
+            </div>
+          </div>
+        </div>
+      </header>
 
-      <!-- 2. 投稿モデレーションパネル -->
-      <section id="panel-posts" class="admin-panel" role="tabpanel" aria-labelledby="tab-btn-posts" hidden>
-        <section class="admin-card" aria-labelledby="posts-mod-heading">
-          <h2 id="posts-mod-heading">投稿の非表示（論理削除）・ピン留め管理</h2>
-          <div class="admin-toolbar-row">
-            <label class="admin-field admin-thread-picker" for="mod-thread-select">
-              <span>対象スレッド</span>
-              <select id="mod-thread-select"></select>
-            </label>
-            <button type="button" id="mod-posts-reload" class="button-secondary button-small">投稿を読み込み直す</button>
-          </div>
-          <div id="mod-posts-list" class="mod-posts-list"></div>
-        </section>
-      </section>
+      <main id="main" tabindex="-1">
+        <div id="admin-error-banner" class="error-banner" role="alert" tabindex="-1" hidden></div>
+        <div id="page"></div>
+      </main>
+    </div>
+  </div>
 
-      <!-- 3. ユーザー一覧パネル -->
-      <section id="panel-users" class="admin-panel" role="tabpanel" aria-labelledby="tab-btn-users" hidden>
-        <section class="admin-card" aria-labelledby="users-list-heading">
-          <div class="admin-card-head">
-            <h2 id="users-list-heading">登録ユーザー一覧</h2>
-            <span id="users-total-label" class="admin-muted-meta"></span>
-          </div>
-          <p class="admin-help">ロール変更や権限トグルの Web 操作は Step 2 で実装予定です。パスワード再発行は引き続き管理 CLI（<code>moderate.js</code>）で実施します。</p>
-          <div class="admin-table-wrap">
-            <table class="admin-table">
-              <thead>
-                <tr>
-                  <th scope="col">ID</th>
-                  <th scope="col">ユーザー名</th>
-                  <th scope="col">ロール</th>
-                  <th scope="col">状態</th>
-                  <th scope="col">有効セッション</th>
-                  <th scope="col">登録日時</th>
-                </tr>
-              </thead>
-              <tbody id="users-table-body"></tbody>
-            </table>
-          </div>
-          <div class="admin-pager">
-            <button type="button" id="users-prev-btn" class="button-secondary button-small" disabled>← 前へ</button>
-            <span id="users-page-info" class="admin-muted-meta">-</span>
-            <button type="button" id="users-next-btn" class="button-secondary button-small" disabled>次へ →</button>
-          </div>
-        </section>
-      </section>
-
-      <!-- 4. 監査ログパネル -->
-      <section id="panel-audit" class="admin-panel" role="tabpanel" aria-labelledby="tab-btn-audit" hidden>
-        <section class="admin-card" aria-labelledby="audit-log-heading">
-          <div class="admin-card-head">
-            <h2 id="audit-log-heading">管理操作 監査ログ</h2>
-            <button type="button" id="audit-reload-btn" class="button-secondary button-small">↻ 最新を取得</button>
-          </div>
-          <p class="admin-help">Web 管理操作（<code>admin_web</code>）と管理 CLI 操作（<code>cli</code>）が状態変更と同一トランザクションで記録されます。</p>
-          <div class="admin-table-wrap">
-            <table class="admin-table">
-              <thead>
-                <tr>
-                  <th scope="col">ID</th>
-                  <th scope="col">日時</th>
-                  <th scope="col">実行元</th>
-                  <th scope="col">操作</th>
-                  <th scope="col">対象</th>
-                  <th scope="col">詳細要約</th>
-                </tr>
-              </thead>
-              <tbody id="audit-table-body"></tbody>
-            </table>
-          </div>
-          <div class="admin-pager">
-            <button type="button" id="audit-more-btn" class="button-secondary button-small" hidden>過去のログをさらに読み込む</button>
-          </div>
-        </section>
-      </section>
-    </section>
-  </main>
+  <!-- 編集・作成・表示設定・非表示確認の汎用ダイアログ -->
+  <dialog id="editor" aria-labelledby="dialog-title">
+    <form id="editor-form">
+      <div class="dialog-heading">
+        <h2 id="dialog-title"></h2>
+        <button id="dialog-close-btn" class="icon-btn" type="button" data-action="close" aria-label="閉じる">
+          <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-close"/></svg></span>
+        </button>
+      </div>
+      <div id="dialog-content"></div>
+      <p id="dialog-error" class="form-error" role="alert"></p>
+      <div class="dialog-footer">
+        <button id="dialog-cancel-btn" type="button" class="btn secondary" data-action="close">キャンセル</button>
+        <button type="submit" class="btn primary" id="dialog-submit">保存</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- スレッド物理削除 2段階確認ダイアログ -->
-  <dialog id="purge-thread-dialog" class="admin-dialog" aria-labelledby="purge-dialog-title">
-    <form id="purge-thread-form" method="dialog" class="admin-dialog-inner">
+  <dialog id="purge-thread-dialog" aria-labelledby="purge-dialog-title">
+    <form id="purge-thread-form" method="dialog">
       <div class="dialog-heading">
-        <div>
-          <span class="eyebrow">⚠ DANGER OPERATION</span>
-          <h2 id="purge-dialog-title">スレッドの完全削除（物理削除）</h2>
-        </div>
-        <button type="button" id="purge-dialog-close" class="icon-button" aria-label="削除確認を閉じる">×</button>
+        <h2 id="purge-dialog-title">スレッドの完全削除（物理削除）</h2>
+        <button type="button" id="purge-dialog-close" class="icon-btn" aria-label="削除確認を閉じる">
+          <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-close"/></svg></span>
+        </button>
       </div>
 
       <div class="danger-notice">
@@ -287,41 +166,64 @@
         </dl>
       </div>
 
-      <div id="purge-dialog-error" class="form-error" role="alert" aria-live="assertive"></div>
+      <p id="purge-dialog-error" class="form-error" role="alert" aria-live="assertive"></p>
 
-      <label class="admin-field" for="purge-confirm-input">
+      <label class="dialog-field" for="purge-confirm-input">
         <span>誤削除防止のため、上のスレッドタイトルをそのまま入力してください</span>
         <input id="purge-confirm-input" type="text" autocomplete="off" required>
       </label>
 
-      <div class="admin-dialog-actions">
-        <button type="button" id="purge-cancel-btn" class="button-secondary">キャンセル</button>
-        <button type="submit" id="purge-confirm-btn" class="button-danger">内容を確認して物理削除を実行</button>
+      <div class="dialog-footer">
+        <button type="button" id="purge-cancel-btn" class="btn secondary">キャンセル</button>
+        <button type="submit" id="purge-confirm-btn" class="btn danger">内容を確認して物理削除を実行</button>
       </div>
     </form>
   </dialog>
 
-  <!-- 空カテゴリ削除 確認ダイアログ（window.confirm不使用でA11y/E2E統一） -->
-  <dialog id="delete-category-dialog" class="admin-dialog" aria-labelledby="delete-cat-title">
-    <form id="delete-category-form" method="dialog" class="admin-dialog-inner">
+  <!-- 空カテゴリ削除 確認ダイアログ -->
+  <dialog id="delete-category-dialog" aria-labelledby="delete-cat-title">
+    <form id="delete-category-form" method="dialog">
       <div class="dialog-heading">
-        <div>
-          <span class="eyebrow">CATEGORY DELETE</span>
-          <h2 id="delete-cat-title">カテゴリの削除確認</h2>
-        </div>
-        <button type="button" id="delete-cat-close" class="icon-button" aria-label="カテゴリ削除確認を閉じる">×</button>
+        <h2 id="delete-cat-title">カテゴリの削除確認</h2>
+        <button type="button" id="delete-cat-close" class="icon-btn" aria-label="カテゴリ削除確認を閉じる">
+          <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="#icon-close"/></svg></span>
+        </button>
       </div>
-      <p id="delete-cat-message">-</p>
-      <div id="delete-cat-error" class="form-error" role="alert"></div>
-      <div class="admin-dialog-actions">
-        <button type="button" id="delete-cat-cancel" class="button-secondary">キャンセル</button>
-        <button type="submit" id="delete-cat-confirm" class="button-danger">カテゴリを削除する</button>
+      <p id="delete-cat-message" class="dialog-body-copy">-</p>
+      <p id="delete-cat-error" class="form-error" role="alert"></p>
+      <div class="dialog-footer">
+        <button type="button" id="delete-cat-cancel" class="btn secondary">キャンセル</button>
+        <button type="submit" id="delete-cat-confirm" class="btn danger">カテゴリを削除する</button>
       </div>
     </form>
   </dialog>
 
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-  <script src="admin.js" defer></script>
+  <!-- SVGアイコンスプライト（DOM生成側では <use href="#icon-..."> のみ参照し innerHTML 不使用） -->
+  <svg class="svg-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <symbol id="icon-home" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.4"/><rect x="14" y="3" width="7" height="7" rx="1.4"/><rect x="3" y="14" width="7" height="7" rx="1.4"/><rect x="14" y="14" width="7" height="7" rx="1.4"/></symbol>
+      <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/><path d="M3 9h18"/></symbol>
+      <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></symbol>
+      <symbol id="icon-message" viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-8l-5 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M7 9h10M7 13h6"/></symbol>
+      <symbol id="icon-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2m2-15a3 3 0 0 1 0 6m1 3a4 4 0 0 1 3 4v2"/></symbol>
+      <symbol id="icon-log" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6m-6 4h6m-6 4h4"/></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="var(--panel, #fff)"/><circle cx="15" cy="12" r="2" fill="var(--panel, #fff)"/><circle cx="10" cy="18" r="2" fill="var(--panel, #fff)"/></symbol>
+      <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+      <symbol id="icon-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+      <symbol id="icon-back" viewBox="0 0 24 24"><path d="M19 12H5m6-6-6 6 6 6"/></symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M20.3 15A8.6 8.6 0 0 1 9 3.7 8.7 8.7 0 1 0 20.3 15Z"/></symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 4 4"/></symbol>
+      <symbol id="icon-edit" viewBox="0 0 24 24"><path d="m5 15 10-10 4 4-10 10H5v-4Zm8-8 4 4"/></symbol>
+      <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m9 3 8 4-3 3v4l-3 2-6-3 2-3h3l1-3-2-4Zm0 12-3 6"/></symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+      <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.5-4.5L3 9m0-5v5h5M4 13a8 8 0 0 0 14.5 4.5L21 15m0 5v-5h-5"/></symbol>
+    </defs>
+  </svg>
 </body>
 </html>

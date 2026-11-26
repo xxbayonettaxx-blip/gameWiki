@@ -1423,26 +1423,170 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
 
     await click('#auth-open');
     await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#auth-open').classList.contains('is-admin')"), true);
     assert.equal(await evaluate("document.querySelector('#admin-page-link').hidden"), false);
+
+    // 3a. 管理者ヘッダーボタン(#auth-open.is-admin)とアカウント内「管理画面を開く」(#admin-page-link)の5テーマ高コントラスト・狭幅収まり検証
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const adminContrast = await evaluate(`(() => {
+      function parseColor(raw) {
+        const s = String(raw || '').trim();
+        const m = s.match(/rgba?\\(\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+        if (!m) throw new Error('Unparseable color: ' + s);
+        return [Number(m[1]), Number(m[2]), Number(m[3])];
+      }
+      function relLum([r, g, b]) {
+        const f = (c) => {
+          const v = c / 255;
+          return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      }
+      function ratio(c1, c2) {
+        const l1 = relLum(parseColor(c1));
+        const l2 = relLum(parseColor(c2));
+        return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+      }
+      const out = {};
+      for (const theme of ['light', 'dark', 'paper', 'ud-light', 'ud-dark']) {
+        document.documentElement.dataset.theme = theme;
+        const authCs = getComputedStyle(document.querySelector('#auth-open'));
+        const setCs = getComputedStyle(document.querySelector('#settings-open'));
+        const adminLinkCs = getComputedStyle(document.querySelector('#admin-page-link'));
+        const logoutCs = getComputedStyle(document.querySelector('#logout-button'));
+        out[theme] = {
+          headerBtnRatio: ratio(authCs.color, authCs.backgroundColor),
+          headerDistinct: authCs.backgroundColor !== setCs.backgroundColor,
+          entryLinkRatio: ratio(adminLinkCs.color, adminLinkCs.backgroundColor),
+          entryDistinct: adminLinkCs.backgroundColor !== logoutCs.backgroundColor,
+        };
+      }
+      document.documentElement.dataset.theme = 'light';
+      return out;
+    })()`);
+    await send('Emulation.setEmulatedMedia', { features: [] });
+    for (const [theme, m] of Object.entries(adminContrast)) {
+      assert.ok(m.headerBtnRatio >= 7.0, `${theme} headerBtnRatio=${m.headerBtnRatio}`);
+      assert.equal(m.headerDistinct, true, `${theme} headerDistinct`);
+      assert.ok(m.entryLinkRatio >= 4.5, `${theme} entryLinkRatio=${m.entryLinkRatio}`);
+      assert.equal(m.entryDistinct, true, `${theme} entryDistinct`);
+    }
+
+    await click('#auth-close');
+    await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
+    for (const vp of [
+      { width: 320, height: 480, deviceScaleFactor: 1, mobile: true },
+      { width: 390, height: 844, deviceScaleFactor: 1, mobile: true },
+    ]) {
+      await send('Emulation.setDeviceMetricsOverride', vp);
+      const headerFit = await evaluate(`(() => {
+        const auth = document.querySelector('#auth-open').getBoundingClientRect();
+        const settings = document.querySelector('#settings-open').getBoundingClientRect();
+        return {
+          clientW: document.documentElement.clientWidth,
+          scrollW: document.documentElement.scrollWidth,
+          authLeft: auth.left,
+          authRight: auth.right,
+          settingsLeft: settings.left,
+          settingsRight: settings.right,
+        };
+      })()`);
+      assert.ok(headerFit.scrollW <= headerFit.clientW, JSON.stringify(headerFit));
+      assert.ok(headerFit.authLeft >= 0 && headerFit.authRight <= headerFit.settingsLeft + 0.5, JSON.stringify(headerFit));
+      assert.ok(headerFit.settingsRight <= headerFit.clientW, JSON.stringify(headerFit));
+    }
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
     await click('#admin-page-link');
     await waitFor("!document.querySelector('#admin-workspace')?.hidden");
     assert.ok((await evaluate("document.querySelector('#admin-operator-badge').textContent")).includes('race_reg_user'));
 
-    // 4. カテゴリ追加・スレッド追加・スレッド編集(pinnedText/isPinned)＋P2-2一般画面単一ソース案内表示
-    await setField('#new-cat-name', 'E2E管理カテゴリ');
-    await evaluate("document.querySelector('#create-category-form').requestSubmit()");
-    await waitFor("document.querySelector('#structure-list')?.textContent.includes('E2E管理カテゴリ')");
+    // 3b. 新管理画面レイアウト（KPI4カード・検索フィルタ・最近の操作・1280/320px非はみ出し・表示設定同期）
+    const layoutMetrics = await evaluate(`(() => ({
+      statsCount: document.querySelectorAll('.stats .stat').length,
+      navCount: document.querySelectorAll('#navigation .nav-btn').length,
+      recentExists: Boolean(document.querySelector('#recent-audit-list')),
+      clientW: document.documentElement.clientWidth,
+      scrollW: document.documentElement.scrollWidth,
+    }))()`);
+    assert.equal(layoutMetrics.statsCount, 4);
+    assert.equal(layoutMetrics.navCount, 5);
+    assert.equal(layoutMetrics.recentExists, true);
+    assert.ok(layoutMetrics.scrollW <= layoutMetrics.clientW, JSON.stringify(layoutMetrics));
+
+    await setField('#structure-search', '雑談');
+    await waitFor("document.querySelector('#structure-count')?.textContent.includes('検索結果')");
+    await setField('#structure-search', '');
+    await waitFor("document.querySelector('#structure-count')?.textContent.includes('全 ')");
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 640, deviceScaleFactor: 1, mobile: true });
+    const adminMobile = await evaluate(`({
+      clientW: document.documentElement.clientWidth,
+      scrollW: document.documentElement.scrollWidth,
+    })`);
+    assert.ok(adminMobile.scrollW <= adminMobile.clientW, JSON.stringify(adminMobile));
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+    // 表示設定ダイアログ：他キー(sort)を壊さずテーマ・文字サイズを保存できること
+    await evaluate(`localStorage.setItem('community-board-prefs-v1', JSON.stringify({ theme: 'light', font: 16, background: true, sort: 'activity' }))`);
+    await click('.sidebar-bottom [data-action="preferences"]');
+    await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#pref-theme-select'))");
+    await evaluate(`
+      document.querySelector('#pref-theme-select').value = 'ud-dark';
+      document.querySelector('#pref-font-select').value = '18';
+    `);
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor("document.querySelector('#editor').open === false");
+    const savedPrefAfterAdmin = await evaluate(`JSON.parse(localStorage.getItem('community-board-prefs-v1'))`);
+    assert.equal(savedPrefAfterAdmin.theme, 'ud-dark');
+    assert.equal(savedPrefAfterAdmin.font, 18);
+    assert.equal(savedPrefAfterAdmin.sort, 'activity');
+    await click('#admin-theme-toggle');
+    assert.equal(await evaluate("document.documentElement.dataset.theme"), 'ud-light');
+    await evaluate(`
+      localStorage.setItem('community-board-prefs-v1', JSON.stringify({ theme: 'light', font: 16, background: true, sort: 'new' }));
+      document.documentElement.dataset.theme = 'light';
+      document.documentElement.dataset.font = '16';
+    `);
+
+    const ensureCatExpanded = async (catId) => {
+      const hidden = await evaluate(`Boolean(document.querySelector('#cat-${catId}')?.hidden)`);
+      if (hidden) {
+        await click(`[data-action="expand"][data-category-id="${catId}"]`);
+        await waitFor(`document.querySelector('#cat-${catId}')?.hidden === false`);
+      }
+    };
+
+    // 4. モーダル経由でカテゴリ追加/編集・スレッド追加/編集(pinnedText/isPinned)＋P2-2一般画面単一ソース案内表示
+    await click('#open-new-category-btn');
+    await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-category-name'))");
+    await setField('#dialog-category-name', 'E2E管理カテゴリ');
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor("document.querySelector('#editor').open === false && document.querySelector('#structure-list')?.textContent.includes('E2E管理カテゴリ')");
 
     const createdCat = db.listCategoriesWithThreads().find((c) => c.name === 'E2E管理カテゴリ');
     assert.ok(createdCat);
-    await evaluate(`document.querySelector('#new-thread-cat').value = ${JSON.stringify(String(createdCat.id))}`);
-    await setField('#new-thread-title', 'E2E新規スレ');
-    await setField('#new-thread-pinned-text', 'E2E初期案内文');
-    await evaluate("document.querySelector('#create-thread-form').requestSubmit()");
-    await waitFor("document.querySelector('#structure-list')?.textContent.includes('E2E新規スレ')");
+
+    await click(`[data-action="edit-category"][data-category-id="${createdCat.id}"]`);
+    await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-category-name'))");
+    await setField('#dialog-category-name', 'E2E管理カテゴリ改');
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor("document.querySelector('#editor').open === false && document.querySelector('#structure-list')?.textContent.includes('E2E管理カテゴリ改')");
+
+    await click('#open-new-thread-btn');
+    await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+    await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(createdCat.id))}`);
+    await setField('#dialog-thread-title', 'E2E新規スレ');
+    await setField('#dialog-thread-pinned-text', 'E2E初期案内文');
+    await evaluate(`document.querySelector('#dialog-thread-pinned').value = 'yes'`);
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor("document.querySelector('#editor').open === false && document.querySelector('#structure-list')?.textContent.includes('E2E新規スレ')");
 
     const createdTh = db.listCategoriesWithThreads().find((c) => c.id === createdCat.id).threads[0];
     assert.ok(createdTh);
+    assert.equal(createdTh.is_pinned, 1);
     const guideNormalPin = db.createPost({
       threadId: createdTh.id,
       authorName: '常連ガイド',
@@ -1473,11 +1617,15 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
     await send('Page.navigate', { url: url + 'admin.html' });
     await waitFor("!document.querySelector('#admin-workspace')?.hidden");
-    await setField(`[data-thread-title-input="${createdTh.id}"]`, 'E2E改訂スレ');
-    await setField(`[data-thread-pinned-text-input="${createdTh.id}"]`, 'E2E改訂案内文');
-    await evaluate(`document.querySelector('[data-thread-pinned-input="${createdTh.id}"]').checked = false`);
-    await click(`[data-action="save-thread"][data-thread-id="${createdTh.id}"]`);
-    await waitFor("document.querySelector('#structure-list')?.textContent.includes('E2E改訂スレ')");
+    await ensureCatExpanded(createdCat.id);
+    await click(`[data-action="edit-thread"][data-thread-id="${createdTh.id}"]`);
+    await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+    await setField('#dialog-thread-title', 'E2E改訂スレ');
+    await setField('#dialog-thread-pinned-text', 'E2E改訂案内文');
+    await evaluate(`document.querySelector('#dialog-thread-pinned').value = 'no'`);
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor("document.querySelector('#editor').open === false && document.querySelector('#structure-list')?.textContent.includes('E2E改訂スレ')");
+
     const savedTh = db.getAdminOverview().categories.find((c) => c.id === createdCat.id).threads[0];
     assert.equal(savedTh.title, 'E2E改訂スレ');
     assert.equal(savedTh.pinned_text, 'E2E改訂案内文');
@@ -1492,9 +1640,12 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     // 4c. 管理画面で案内文を消去 -> 一般画面の案内枠は非表示になり、通常ピン投稿のみ維持されること
     await send('Page.navigate', { url: url + 'admin.html' });
     await waitFor("!document.querySelector('#admin-workspace')?.hidden");
-    await setField(`[data-thread-pinned-text-input="${createdTh.id}"]`, '');
-    await click(`[data-action="save-thread"][data-thread-id="${createdTh.id}"]`);
-    await waitFor("document.querySelector('#toast')?.textContent.includes('保存しました')");
+    await ensureCatExpanded(createdCat.id);
+    await click(`[data-action="edit-thread"][data-thread-id="${createdTh.id}"]`);
+    await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-pinned-text'))");
+    await setField('#dialog-thread-pinned-text', '');
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor("document.querySelector('#editor').open === false && document.querySelector('#toast')?.textContent.includes('保存しました')");
     assert.equal(db.getThreadDetail(createdTh.id).thread.pinned_text, null);
 
     await send('Page.navigate', { url: `${url}#thread-${createdTh.id}` });
@@ -1505,6 +1656,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
 
     await send('Page.navigate', { url: url + 'admin.html' });
     await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+    await ensureCatExpanded(createdCat.id);
 
     // 5. スレッド削除ダイアログ: Esc閉じる＆トリガーへフォーカス復帰 + 直前投稿増加(409)再確認→削除
     await click(`[data-action="purge-thread"][data-thread-id="${createdTh.id}"]`);
@@ -1536,7 +1688,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await click(`[data-action="delete-category"][data-category-id="${createdCat.id}"]`);
     await waitFor("document.querySelector('#delete-category-dialog').open === true");
     await evaluate("document.querySelector('#delete-category-form').requestSubmit()");
-    await waitFor("!document.querySelector('#structure-list')?.textContent.includes('E2E管理カテゴリ')");
+    await waitFor("document.querySelector('#delete-category-dialog').open === false && !document.querySelector('#structure-list')?.textContent.includes('E2E管理カテゴリ改')");
 
     // 6a. P2-1回帰: スレッド切替中の旧一覧操作遮断 ＋ 応答順逆転(A遅延・B先行完了→A遅延完了)でもBのみ表示・操作されること
     const racePostA = db.createPost({
@@ -1555,7 +1707,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       evaluate(
         `(() => { const s = document.querySelector('#mod-thread-select'); s.value = ${JSON.stringify(String(tid))}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`
       );
-    await click('#tab-btn-posts');
+    await click('#nav-btn-posts');
     await selectModThread(2);
     await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('スレッド2固有のレース確認投稿B')");
 
@@ -1605,42 +1757,57 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     const raceFinalText = await evaluate("document.querySelector('#mod-posts-list').textContent");
     assert.equal(raceFinalText.includes('スレッド2固有のレース確認投稿B'), true);
     assert.equal(raceFinalText.includes('スレッド1固有のレース確認投稿A'), false);
-    assert.equal(await evaluate(`Boolean(document.querySelector('[data-action="soft-delete-post"][data-post-id="${racePostA.id}"]'))`), false);
-    await click(`[data-action="soft-delete-post"][data-post-id="${racePostB.id}"]`);
-    await waitFor(`document.querySelector('[data-action="soft-delete-post"][data-post-id="${racePostB.id}"]')?.disabled === true`);
+    assert.equal(await evaluate(`Boolean(document.querySelector('[data-action="hide-post"][data-post-id="${racePostA.id}"]'))`), false);
+
+    // 確認モーダル(#editor hide-post)経由で racePostB を非表示化 ＋ 表示状態フィルタ確認
+    await click(`[data-action="hide-post"][data-post-id="${racePostB.id}"]`);
+    await waitFor("document.querySelector('#editor').open === true && document.querySelector('#dialog-title')?.textContent.includes('非表示')");
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor(`document.querySelector('#editor').open === false && document.querySelector('[data-action="hide-post"][data-post-id="${racePostB.id}"]')?.disabled === true`);
     assert.equal(db.getThreadDetail(2).posts.find((p) => p.id === racePostB.id).is_deleted, 1);
     assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === racePostA.id).is_deleted, 0);
 
-    // 6b. Thread 1 を対象に戻し構造タブへ移動後、キーボード ArrowRight で投稿モデレーションタブへ切替 → 投稿ピン＆論理削除
+    await evaluate(`(() => { const f = document.querySelector('#post-filter'); f.value = 'visible'; f.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await waitFor("document.querySelector('#mod-posts-list').textContent.includes('スレッド2固有のレース確認投稿B') === false");
+    await evaluate(`(() => { const f = document.querySelector('#post-filter'); f.value = 'hidden'; f.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await waitFor("document.querySelector('#mod-posts-list').textContent.includes('この投稿は削除されました')");
+    await evaluate(`(() => { const f = document.querySelector('#post-filter'); f.value = 'all'; f.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+
+    // 6b. Thread 1 を対象に戻しカテゴリタブへ移動後、キーボード ArrowRight で投稿管理へ切替 → 投稿ピン＆論理削除
     await selectModThread(1);
     await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('スレッド1固有のレース確認投稿A')");
-    await click('#tab-btn-structure');
+    await click('#nav-btn-structure');
     const disposablePost = db.createPost({
       threadId: 1,
       authorName: 'モデ確認用',
       visitorId: 'e2e_mod',
       content: '管理画面から非表示にする投稿E2E',
     });
-    await evaluate("document.querySelector('#tab-btn-structure').focus()");
+    await evaluate("document.querySelector('#nav-btn-structure').focus()");
     await pressKey('ArrowRight', 'ArrowRight', 39);
-    await waitFor("document.querySelector('#tab-btn-posts').getAttribute('aria-selected') === 'true' && document.querySelector('#mod-posts-list')?.textContent.includes('管理画面から非表示にする投稿E2E')");
+    await waitFor("document.querySelector('#nav-btn-posts').getAttribute('aria-selected') === 'true' && document.querySelector('#mod-posts-list')?.textContent.includes('管理画面から非表示にする投稿E2E')");
 
     await click(`[data-action="toggle-pin-post"][data-post-id="${disposablePost.id}"]`);
     await waitFor(`document.querySelector('[data-action="toggle-pin-post"][data-post-id="${disposablePost.id}"]')?.textContent.includes('解除')`);
     assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === disposablePost.id).is_pinned, 1);
 
-    await click(`[data-action="soft-delete-post"][data-post-id="${disposablePost.id}"]`);
-    await waitFor(`document.querySelector('[data-action="soft-delete-post"][data-post-id="${disposablePost.id}"]')?.disabled === true`);
+    await click(`[data-action="hide-post"][data-post-id="${disposablePost.id}"]`);
+    await waitFor("document.querySelector('#editor').open === true");
+    await evaluate("document.querySelector('#editor-form').requestSubmit()");
+    await waitFor(`document.querySelector('#editor').open === false && document.querySelector('[data-action="hide-post"][data-post-id="${disposablePost.id}"]')?.disabled === true`);
     assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === disposablePost.id).is_deleted, 1);
 
-    // 7. ユーザー一覧＆監査ログタブ表示（秘密非表示・操作履歴反映）
-    await click('#tab-btn-users');
-    await waitFor("document.querySelector('#users-table-body')?.textContent.includes('race_reg_user')");
+    // 7. キーボード矢印で会員一覧＆監査ログページへ移動（フォーカス維持・秘密非表示・操作履歴反映）
+    await evaluate("document.querySelector('#nav-btn-posts').focus()");
+    await pressKey('ArrowRight', 'ArrowRight', 39);
+    await waitFor("document.querySelector('#nav-btn-members').getAttribute('aria-selected') === 'true' && document.querySelector('#users-table-body')?.textContent.includes('race_reg_user')");
+    assert.equal(await evaluate("document.activeElement?.id"), 'nav-btn-members');
     assert.equal(await evaluate("document.body.textContent.includes('scrypt$')"), false);
 
-    await click('#tab-btn-audit');
-    await waitFor("document.querySelector('#audit-table-body')?.textContent.includes('thread_purge')");
-    const auditBodyText = await evaluate("document.querySelector('#audit-table-body').textContent");
+    await pressKey('ArrowRight', 'ArrowRight', 39);
+    await waitFor("document.querySelector('#nav-btn-audit').getAttribute('aria-selected') === 'true' && document.querySelector('#audit-list')?.textContent.includes('thread_purge')");
+    assert.equal(await evaluate("document.activeElement?.id"), 'nav-btn-audit');
+    const auditBodyText = await evaluate("document.querySelector('#audit-list').textContent");
     assert.ok(auditBodyText.includes('category_create'));
     assert.ok(auditBodyText.includes('post_soft_delete'));
   });
