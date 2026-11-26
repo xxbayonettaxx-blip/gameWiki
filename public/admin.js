@@ -575,16 +575,27 @@
     }
   }
 
-  function buildStructurePanel() {
+  // headerActions 指定時（概要ページ）は「カテゴリ・スレッド」パネルヘッダー右上へ操作ボタンを配置する
+  function buildStructurePanel(headerActions = null) {
     const panel = el('section', 'panel');
     panel.setAttribute('aria-labelledby', 'structure-title');
 
     const head = el('div', 'panel-head');
-    const headLeft = el('div');
+    const headLeft = el('div', 'panel-head-main');
     const h2 = el('h2', '', 'カテゴリ・スレッド');
     h2.id = 'structure-title';
     headLeft.append(h2, el('p', '', 'カテゴリを開いて、スレッドの案内や表示順を編集できます。'));
     head.append(headLeft);
+    const actionList = Array.isArray(headerActions)
+      ? headerActions.filter(Boolean)
+      : headerActions
+        ? [headerActions]
+        : [];
+    if (actionList.length > 0) {
+      const actionsWrap = el('div', 'panel-head-actions');
+      actionsWrap.append(...actionList);
+      head.append(actionsWrap);
+    }
 
     const searchWrap = el('div', 'search-wrap');
     const searchInput = el('input');
@@ -956,9 +967,9 @@
       );
     } else {
       const cols = el('div', 'columns');
-      cols.append(buildStructurePanel(), buildActivityPanel(false));
+      cols.append(buildStructurePanel([newCategoryBtn, newThreadBtn]), buildActivityPanel(false));
       pageRoot.append(
-        buildPageHeading('掲示板管理', '掲示板の構成と最近の管理操作を確認します。', [newCategoryBtn, newThreadBtn]),
+        buildPageHeading('掲示板管理', '掲示板の構成と最近の管理操作を確認します。'),
         buildStatsGrid(),
         cols
       );

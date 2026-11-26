@@ -1522,26 +1522,52 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.equal(layoutMetrics.recentExists, true);
     assert.ok(layoutMetrics.scrollW <= layoutMetrics.clientW, JSON.stringify(layoutMetrics));
 
-    // UI改善3項目 (デスクトップ 1280px 概要・カテゴリ管理の両ページでボタン配置と階層インデントを確認)
+    // UI改善項目 (デスクトップ 1280px 概要・カテゴリ管理の両ページでボタン配置位置・階層インデントを確認)
     for (const pageKey of ['overview', 'structure']) {
       await click(`#nav-btn-${pageKey}`);
       await waitFor(`document.querySelector('#nav-btn-${pageKey}')?.getAttribute('aria-current') === 'page'`);
       const uiMetrics = await evaluate(`(() => {
-        const catBtn = document.querySelector('#open-new-category-btn').getBoundingClientRect();
-        const thBtn = document.querySelector('#open-new-thread-btn').getBoundingClientRect();
+        const catBtnEl = document.querySelector('#open-new-category-btn');
+        const thBtnEl = document.querySelector('#open-new-thread-btn');
+        const structurePanel = document.querySelector('section[aria-labelledby="structure-title"]');
+        const structureActions = structurePanel?.querySelector('.panel-head .panel-head-actions');
+        const pageHeadingActions = document.querySelector('.page-heading .page-heading-actions');
+        const catBtn = catBtnEl.getBoundingClientRect();
+        const thBtn = thBtnEl.getBoundingClientRect();
+        const titleRect = document.querySelector('#structure-title').getBoundingClientRect();
+        const panelRect = structurePanel.getBoundingClientRect();
         const openBody = [...document.querySelectorAll('#structure-list .category-body')]
           .find((b) => !b.hidden && b.querySelector('.thread-row .thread-name'));
         const catIcon = openBody?.closest('.category')?.querySelector('.category-head .icon')?.getBoundingClientRect();
         const thName = openBody?.querySelector('.thread-row .thread-name')?.getBoundingClientRect();
         return {
           catBtnCount: document.querySelectorAll('#open-new-category-btn').length,
+          inStructureHead: Boolean(structureActions && structureActions.contains(catBtnEl) && structureActions.contains(thBtnEl)),
+          inPageHeading: Boolean(pageHeadingActions && pageHeadingActions.contains(catBtnEl) && pageHeadingActions.contains(thBtnEl)),
+          catLeft: catBtn.left,
+          catTop: catBtn.top,
           catRight: catBtn.right,
           thLeft: thBtn.left,
+          thTop: thBtn.top,
+          thRight: thBtn.right,
+          titleTop: titleRect.top,
+          titleRight: titleRect.right,
+          panelRight: panelRect.right,
           sameRowDiff: Math.abs(catBtn.top - thBtn.top),
           indentPx: thName && catIcon ? thName.left - catIcon.left : -1,
         };
       })()`);
       assert.equal(uiMetrics.catBtnCount, 1);
+      if (pageKey === 'overview') {
+        assert.equal(uiMetrics.inStructureHead, true, JSON.stringify(uiMetrics));
+        assert.equal(uiMetrics.inPageHeading, false, JSON.stringify(uiMetrics));
+        assert.ok(uiMetrics.catLeft >= uiMetrics.titleRight - 0.5, JSON.stringify(uiMetrics));
+        assert.ok(Math.abs(uiMetrics.catTop - uiMetrics.titleTop) < 20, JSON.stringify(uiMetrics));
+        assert.ok(uiMetrics.thRight <= uiMetrics.panelRight + 0.5, JSON.stringify(uiMetrics));
+      } else {
+        assert.equal(uiMetrics.inPageHeading, true, JSON.stringify(uiMetrics));
+        assert.equal(uiMetrics.inStructureHead, false, JSON.stringify(uiMetrics));
+      }
       assert.ok(uiMetrics.catRight <= uiMetrics.thLeft + 0.5, `${pageKey}: ${JSON.stringify(uiMetrics)}`);
       assert.ok(uiMetrics.sameRowDiff < 8, `${pageKey}: ${JSON.stringify(uiMetrics)}`);
       assert.ok(uiMetrics.indentPx >= 16, `${pageKey}: ${JSON.stringify(uiMetrics)}`);
@@ -1609,6 +1635,24 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await setField('#structure-search', '');
     await waitFor("document.querySelector('#structure-count')?.textContent.includes('全 ')");
 
+    // 中間 2 カラム狭幅 (1060px) でのパネル内収まり確認
+    await send('Emulation.setDeviceMetricsOverride', { width: 1060, height: 800, deviceScaleFactor: 1, mobile: false });
+    const midMetrics = await evaluate(`(() => {
+      const panelRect = document.querySelector('section[aria-labelledby="structure-title"]').getBoundingClientRect();
+      const catBtn = document.querySelector('#open-new-category-btn').getBoundingClientRect();
+      const thBtn = document.querySelector('#open-new-thread-btn').getBoundingClientRect();
+      return {
+        clientW: document.documentElement.clientWidth,
+        scrollW: document.documentElement.scrollWidth,
+        catRight: catBtn.right,
+        thRight: thBtn.right,
+        panelRight: panelRect.right,
+      };
+    })()`);
+    assert.ok(midMetrics.scrollW <= midMetrics.clientW, JSON.stringify(midMetrics));
+    assert.ok(midMetrics.catRight <= midMetrics.panelRight + 0.5, JSON.stringify(midMetrics));
+    assert.ok(midMetrics.thRight <= midMetrics.panelRight + 0.5, JSON.stringify(midMetrics));
+
     // 320px 狭幅（標準文字16 / 大文字18）での非はみ出し・モバイル戻るリンク赤み・子スレッドインデント検証
     await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 640, deviceScaleFactor: 1, mobile: true });
     for (const fontVal of ['16', '18']) {
@@ -1631,6 +1675,8 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         const [r2, g2, b2] = parseColor(mBackCs.color);
         const l1 = relLum([r1, g1, b1]);
         const l2 = relLum([r2, g2, b2]);
+        const catBtn = document.querySelector('#open-new-category-btn').getBoundingClientRect();
+        const thBtn = document.querySelector('#open-new-thread-btn').getBoundingClientRect();
         const openBody = [...document.querySelectorAll('#structure-list .category-body')]
           .find((b) => !b.hidden && b.querySelector('.thread-row .thread-name'));
         const catIcon = openBody?.closest('.category')?.querySelector('.category-head .icon')?.getBoundingClientRect();
@@ -1639,6 +1685,8 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
           font: document.documentElement.dataset.font,
           clientW: document.documentElement.clientWidth,
           scrollW: document.documentElement.scrollWidth,
+          catRight: catBtn.right,
+          thRight: thBtn.right,
           mobileBackVisible: mBackCs.display !== 'none',
           mobileBackRedBg: r1 > g1 && r1 > b1,
           mobileBackRedFg: r2 > g2 && r2 > b2,
@@ -1647,6 +1695,8 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         };
       })()`);
       assert.ok(adminMobile.scrollW <= adminMobile.clientW, `font=${fontVal}: ${JSON.stringify(adminMobile)}`);
+      assert.ok(adminMobile.catRight <= adminMobile.clientW + 0.5, `font=${fontVal}: ${JSON.stringify(adminMobile)}`);
+      assert.ok(adminMobile.thRight <= adminMobile.clientW + 0.5, `font=${fontVal}: ${JSON.stringify(adminMobile)}`);
       assert.equal(adminMobile.mobileBackVisible, true);
       assert.equal(adminMobile.mobileBackRedBg, true);
       assert.equal(adminMobile.mobileBackRedFg, true);
