@@ -13,9 +13,8 @@
  */
 
 const fs = require('node:fs');
-const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { createBoardDb, resolveProjectDbPath } = require('./db');
+const { resolveProjectDbPath, vacuumSqliteConnectionToFile } = require('./db');
 
 function runBackup(options = {}) {
   const rawSrcPath = options.srcPath || process.env.DB_PATH || './data/board.db';
@@ -24,47 +23,45 @@ function runBackup(options = {}) {
   const srcPath = resolveProjectDbPath(rawSrcPath);
   const destPath = resolveProjectDbPath(rawDestPath);
 
+  if (srcPath === ':memory:') {
+    throw new Error('インメモリDB（:memory:）はバックアップCLIの対象にできません。実DBファイルパスを指定してください。');
+  }
+
   if (srcPath === destPath) {
     throw new Error(`バックアップ元とバックアップ先に同一のパスは指定できません (${srcPath})`);
   }
 
   // 1. 元DBの存在確認（欠落時に空DBを新規作成して上書きする事故を防止）
-  if (srcPath !== ':memory:') {
-    if (!fs.existsSync(srcPath)) {
-      throw new Error(`バックアップ元のDBファイルが存在しません (${srcPath})。バックアップを中断します。`);
-    }
-
-    const stat = fs.statSync(srcPath);
-    if (stat.size === 0) {
-      throw new Error(`バックアップ元のDBファイルが0バイトです (${srcPath})。バックアップを中断します。`);
-    }
+  if (!fs.existsSync(srcPath)) {
+    throw new Error(`バックアップ元のDBファイルが存在しません (${srcPath})。バックアップを中断します。`);
   }
 
-  // 2. 元DBの整合性と非空検査（読み取り専用で事前検証）
-  if (srcPath !== ':memory:') {
-    const probe = new DatabaseSync(srcPath, { readOnly: true });
-    try {
-      const qc = probe.prepare('PRAGMA quick_check;').get();
-      if (!qc || String(qc.quick_check).toLowerCase() !== 'ok') {
-        throw new Error(`元DBの整合性検査（quick_check）に失敗しました: ${qc?.quick_check}`);
-      }
-      const fk = probe.prepare('PRAGMA foreign_key_check;').all();
-      if (fk && fk.length > 0) {
-        throw new Error(`元DBで外部キー制約違反（foreign_key_check）が ${fk.length} 件検出されました。`);
-      }
-      const catCount = probe.prepare('SELECT COUNT(*) AS c FROM categories;').get();
-      if (!catCount || Number(catCount.c) === 0) {
-        throw new Error('元DBのカテゴリ件数が0件（未初期化または空）です。既存バックアップを保護するため中断します。');
-      }
-    } finally {
-      probe.close();
-    }
+  const stat = fs.statSync(srcPath);
+  if (stat.size === 0) {
+    throw new Error(`バックアップ元のDBファイルが0バイトです (${srcPath})。バックアップを中断します。`);
   }
 
-  // 3. 安全性が確認できたため、createBoardDb と backupTo で原子的バックアップを実行
-  const db = createBoardDb({ dbPath: srcPath });
+  // 2. 元DBの整合性検査・非空検査・原子的複製をすべて読み取り専用接続（非移行）で完結する
+  // ※ createBoardDb を通さないことで、元DBの schema や user_version を一切書き換えない。
+  const probe = new DatabaseSync(srcPath, { readOnly: true });
   try {
-    const finalPath = db.backupTo(destPath, { requireNonEmptyCategories: true });
+    probe.exec('PRAGMA busy_timeout = 5000;');
+    const qc = probe.prepare('PRAGMA quick_check;').get();
+    if (!qc || String(qc.quick_check).toLowerCase() !== 'ok') {
+      throw new Error(`元DBの整合性検査（quick_check）に失敗しました: ${qc?.quick_check}`);
+    }
+    const fk = probe.prepare('PRAGMA foreign_key_check;').all();
+    if (fk && fk.length > 0) {
+      throw new Error(`元DBで外部キー制約違反（foreign_key_check）が ${fk.length} 件検出されました。`);
+    }
+    const catCount = probe.prepare('SELECT COUNT(*) AS c FROM categories;').get();
+    if (!catCount || Number(catCount.c) === 0) {
+      throw new Error('元DBのカテゴリ件数が0件（未初期化または空）です。既存バックアップを保護するため中断します。');
+    }
+
+    const finalPath = vacuumSqliteConnectionToFile(probe, destPath, {
+      requireNonEmptyCategories: true,
+    });
     const backupStat = fs.statSync(finalPath);
     return {
       success: true,
@@ -74,7 +71,7 @@ function runBackup(options = {}) {
       timestamp: new Date().toISOString(),
     };
   } finally {
-    db.close();
+    probe.close();
   }
 }
 

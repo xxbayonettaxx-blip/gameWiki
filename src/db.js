@@ -15,11 +15,24 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { ValidationError, parsePositiveInt, validatePostInput, validateUsername, validateUserRole } = require('./validators');
+const {
+  ValidationError,
+  parsePositiveInt,
+  validatePostInput,
+  validateUsername,
+  validateUserRole,
+  validateCategoryName,
+  validateThreadTitle,
+  validateThreadPinnedText,
+  validateNonNegativeInt,
+  parsePaginationLimit,
+  parsePaginationOffset,
+} = require('./validators');
 
 // プロジェクトルートおよびスキーマ正本のパス（カレントディレクトリに依存しない __dirname 基準）
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_SCHEMA_PATH = path.join(__dirname, 'schema.sql');
+const TARGET_SCHEMA_VERSION = 3;
 
 // 1スレッドあたりの保存・取得上限と返信階層の深さ上限（見えない投稿の蓄積とネストDoSを防止）
 const DEFAULT_MAX_POSTS_PER_THREAD = 500;
@@ -37,6 +50,58 @@ function resolveProjectDbPath(rawDbPath = './data/board.db') {
     return path.normalize(rawDbPath);
   }
   return path.resolve(PROJECT_ROOT, rawDbPath);
+}
+
+// ---------------------------------------------------------------------
+// 1b. 非移行・原子的バックアップ複製ヘルパー（backup.js / db.backupTo 共用）
+// 開いている SQLite 接続から一時ファイルへ VACUUM INTO し、整合性検証後に原子的置換する。
+// DDL や user_version の更新は一切行わないため、readOnly 接続からの前世代退避にも安全に使える。
+// ---------------------------------------------------------------------
+function vacuumSqliteConnectionToFile(sqlite, destinationPath, options = {}) {
+  const dest = path.resolve(destinationPath);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+
+  const tmpDest = `${dest}.tmp-${process.pid}-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2, 8)}`;
+  const escapedTmp = tmpDest.replace(/'/g, "''");
+
+  try {
+    sqlite.exec(`VACUUM INTO '${escapedTmp}';`);
+
+    // 生成された新世代バックアップの整合性と代表テーブルの読取可能性を検証してから切り替える
+    const checkDb = new DatabaseSync(tmpDest, { readOnly: true });
+    try {
+      const qc = checkDb.prepare('PRAGMA quick_check;').get();
+      if (!qc || String(qc.quick_check).toLowerCase() !== 'ok') {
+        throw new Error('生成されたバックアップファイルの整合性検査（quick_check）に失敗しました。');
+      }
+      const fk = checkDb.prepare('PRAGMA foreign_key_check;').all();
+      if (fk && fk.length > 0) {
+        throw new Error('生成されたバックアップファイルで外部キー制約違反（foreign_key_check）が検出されました。');
+      }
+      const catCount = checkDb.prepare('SELECT COUNT(*) AS c FROM categories;').get();
+      checkDb.prepare('SELECT COUNT(*) AS c FROM threads;').get();
+      checkDb.prepare('SELECT COUNT(*) AS c FROM posts;').get();
+      if (options.requireNonEmptyCategories && Number(catCount?.c ?? 0) === 0) {
+        throw new Error('バックアップ対象DBのカテゴリ件数が0件です。空のDBで既存バックアップを上書きすることを拒否しました。');
+      }
+    } finally {
+      checkDb.close();
+    }
+
+    fs.renameSync(tmpDest, dest);
+    return dest;
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpDest)) {
+        fs.unlinkSync(tmpDest);
+      }
+    } catch {
+      // 一時ファイル掃除失敗は無視し、元の例外を優先して投げる
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -66,48 +131,9 @@ function createBoardDb(options = {}) {
   const sqlite = new DatabaseSync(targetPath);
 
   try {
-    // 同時アクセス時の即時ロックエラー（SQLITE_BUSY）を緩和するため最大5秒待機
+    // 接続ごとの必須設定（PRAGMA WAL / foreign_keys はトランザクション外で設定・検証する）
     sqlite.exec('PRAGMA busy_timeout = 5000;');
-
-    // 既存DBからの非破壊アップグレード：既存テーブルが存在する場合、不足カラムを先にALTER TABLEで追加
-    // （CREATE TABLE IF NOT EXISTS は既存テーブルの列を増やさないため、インデックス作成前に実行する）
-    const postColumns = sqlite.prepare('PRAGMA table_info(posts);').all();
-    if (postColumns.length > 0 && !postColumns.some((col) => col.name === 'is_pinned')) {
-      sqlite.exec(
-        'ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0 CHECK(is_pinned IN (0, 1));'
-      );
-    }
-
-    const threadColumns = sqlite.prepare('PRAGMA table_info(threads);').all();
-    if (threadColumns.length > 0 && !threadColumns.some((col) => col.name === 'display_order')) {
-      sqlite.exec(
-        'ALTER TABLE threads ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;'
-      );
-    }
-
-    const userColumns = sqlite.prepare('PRAGMA table_info(users);').all();
-    if (userColumns.length > 0 && !userColumns.some((col) => col.name === 'auth_version')) {
-      sqlite.exec('ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0;');
-    }
-    if (userColumns.length > 0 && !userColumns.some((col) => col.name === 'must_change_password')) {
-      sqlite.exec(
-        'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1));'
-      );
-    }
-
-    // スキーマ正本（PRAGMA foreign_keys = ON, WAL, 5テーブル, インデックス）を読み込んで適用
-    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    sqlite.exec(schemaSql);
-
-    // 極初期スキーマ(created_by欠落DB)からの非破壊移行（usersテーブル作成後に外部キー付きで追加）
-    if (postColumns.length > 0 && !postColumns.some((col) => col.name === 'created_by')) {
-      sqlite.exec('ALTER TABLE posts ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;');
-    }
-    if (threadColumns.length > 0 && !threadColumns.some((col) => col.name === 'created_by')) {
-      sqlite.exec('ALTER TABLE threads ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;');
-    }
-
-    // 接続ごとに必須の外部キー制約を再度明示ONにし、実際に有効化されたか戻り値を検証する
+    sqlite.exec('PRAGMA journal_mode = WAL;');
     sqlite.exec('PRAGMA foreign_keys = ON;');
     const fkRow = sqlite.prepare('PRAGMA foreign_keys;').get();
     const foreignKeys = fkRow ? fkRow.foreign_keys : 0;
@@ -119,12 +145,64 @@ function createBoardDb(options = {}) {
     const jmRow = sqlite.prepare('PRAGMA journal_mode;').get();
     const journalMode = jmRow ? String(jmRow.journal_mode).toLowerCase() : 'unknown';
 
-    // スキーマ適用版を記録する（将来マイグレーション用の観測指標）
+    // スキーマ適用版を確認し、旧版であれば DDL と user_version 更新を単一トランザクションで原子適用する
     const uvRow = sqlite.prepare('PRAGMA user_version;').get();
     let schemaVersion = uvRow ? Number(uvRow.user_version) : 0;
-    if (schemaVersion < 2) {
-      sqlite.exec('PRAGMA user_version = 2;');
-      schemaVersion = 2;
+    if (schemaVersion < TARGET_SCHEMA_VERSION) {
+      const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+      sqlite.exec('BEGIN IMMEDIATE;');
+      try {
+        const lockedUvRow = sqlite.prepare('PRAGMA user_version;').get();
+        const lockedVersion = lockedUvRow ? Number(lockedUvRow.user_version) : 0;
+        if (lockedVersion < TARGET_SCHEMA_VERSION) {
+          // 既存DBからの非破壊アップグレード：不足カラムをインデックス作成前に追加する
+          const postColumns = sqlite.prepare('PRAGMA table_info(posts);').all();
+          if (postColumns.length > 0 && !postColumns.some((col) => col.name === 'is_pinned')) {
+            sqlite.exec(
+              'ALTER TABLE posts ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0 CHECK(is_pinned IN (0, 1));'
+            );
+          }
+
+          const threadColumns = sqlite.prepare('PRAGMA table_info(threads);').all();
+          if (threadColumns.length > 0 && !threadColumns.some((col) => col.name === 'display_order')) {
+            sqlite.exec(
+              'ALTER TABLE threads ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;'
+            );
+          }
+
+          const userColumns = sqlite.prepare('PRAGMA table_info(users);').all();
+          if (userColumns.length > 0 && !userColumns.some((col) => col.name === 'auth_version')) {
+            sqlite.exec('ALTER TABLE users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0;');
+          }
+          if (userColumns.length > 0 && !userColumns.some((col) => col.name === 'must_change_password')) {
+            sqlite.exec(
+              'ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1));'
+            );
+          }
+
+          // スキーマ正本（純粋DDLのみ）を単一トランザクション内で適用
+          sqlite.exec(schemaSql);
+
+          // 極初期スキーマ(created_by欠落DB)からの非破壊移行（usersテーブル作成後に外部キー付きで追加）
+          if (postColumns.length > 0 && !postColumns.some((col) => col.name === 'created_by')) {
+            sqlite.exec('ALTER TABLE posts ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;');
+          }
+          if (threadColumns.length > 0 && !threadColumns.some((col) => col.name === 'created_by')) {
+            sqlite.exec('ALTER TABLE threads ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;');
+          }
+
+          sqlite.exec(`PRAGMA user_version = ${TARGET_SCHEMA_VERSION};`);
+        }
+        sqlite.exec('COMMIT;');
+        schemaVersion = Math.max(lockedVersion, TARGET_SCHEMA_VERSION);
+      } catch (migrationErr) {
+        try {
+          sqlite.exec('ROLLBACK;');
+        } catch {
+          // ロールバック失敗時は元の例外を優先
+        }
+        throw migrationErr;
+      }
     }
 
     // -----------------------------------------------------------------
@@ -264,12 +342,39 @@ function createBoardDb(options = {}) {
         SELECT COALESCE(MAX(display_order), 0) AS max_order FROM threads WHERE category_id = ?
       `),
       insertThread: sqlite.prepare(`
-        INSERT INTO threads (category_id, title, pinned_text, is_pinned, display_order)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO threads (category_id, title, pinned_text, is_pinned, display_order, created_by)
+        VALUES (?, ?, ?, ?, ?, ?)
       `),
       updateThreadById: sqlite.prepare(`
         UPDATE threads SET title = ?, pinned_text = ?, is_pinned = ?, display_order = ? WHERE id = ?
       `),
+      countThreadsInCategory: sqlite.prepare(`
+        SELECT COUNT(*) AS cnt FROM threads WHERE category_id = ?
+      `),
+      deleteCategoryById: sqlite.prepare(`
+        DELETE FROM categories WHERE id = ?
+      `),
+      listAdminThreadsSummary: sqlite.prepare(`
+        SELECT
+          t.id,
+          t.category_id,
+          t.title,
+          t.pinned_text,
+          t.is_pinned,
+          t.display_order,
+          t.created_at,
+          COUNT(p.id) AS post_count,
+          COALESCE(MAX(CASE WHEN p.is_deleted = 0 THEN p.created_at END), t.created_at) AS latest_post_at
+        FROM threads t
+        LEFT JOIN posts p ON p.thread_id = t.id
+        GROUP BY t.id
+        ORDER BY t.category_id ASC, t.is_pinned DESC, t.display_order ASC, t.id ASC
+      `),
+      countCategories: sqlite.prepare('SELECT COUNT(*) AS cnt FROM categories'),
+      countThreads: sqlite.prepare('SELECT COUNT(*) AS cnt FROM threads'),
+      countPostsTotal: sqlite.prepare('SELECT COUNT(*) AS cnt FROM posts'),
+      countUsersTotal: sqlite.prepare('SELECT COUNT(*) AS cnt FROM users'),
+      countAdminUsers: sqlite.prepare("SELECT COUNT(*) AS cnt FROM users WHERE role = 'admin'"),
 
       // 物理削除（purge-tree / purge-thread）用のステートメント
       getPostWithThreadAndCategory: sqlite.prepare(`
@@ -358,6 +463,42 @@ function createBoardDb(options = {}) {
         LEFT JOIN sessions s ON s.user_id = u.id
         GROUP BY u.id
         ORDER BY u.id ASC
+      `),
+
+      listAdminUsersPaged: sqlite.prepare(`
+        SELECT
+          u.id,
+          u.username,
+          u.role,
+          u.must_change_password,
+          u.created_at,
+          COUNT(CASE WHEN s.expires_at > ? THEN 1 END) AS active_sessions
+        FROM users u
+        LEFT JOIN sessions s ON s.user_id = u.id
+        GROUP BY u.id
+        ORDER BY u.id ASC
+        LIMIT ? OFFSET ?
+      `),
+
+      insertAdminAuditLog: sqlite.prepare(`
+        INSERT INTO admin_audit_logs (
+          actor_type, actor_user_id, actor_username, action, target_type, target_id, detail_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `),
+
+      listAdminAuditLogsInitial: sqlite.prepare(`
+        SELECT id, actor_type, actor_user_id, actor_username, action, target_type, target_id, detail_json, created_at
+        FROM admin_audit_logs
+        ORDER BY id DESC
+        LIMIT ?
+      `),
+
+      listAdminAuditLogsBefore: sqlite.prepare(`
+        SELECT id, actor_type, actor_user_id, actor_username, action, target_type, target_id, detail_json, created_at
+        FROM admin_audit_logs
+        WHERE id < ?
+        ORDER BY id DESC
+        LIMIT ?
       `),
 
       insertSession: sqlite.prepare(`
@@ -497,6 +638,125 @@ function createBoardDb(options = {}) {
     }
 
     // -----------------------------------------------------------------
+    // 3b. 管理MVP用の再認可（確定直前検査）＋秘密除去監査ログ記録ヘルパー
+    // -----------------------------------------------------------------
+    function assertActiveAdminInTx(adminAuth) {
+      if (!adminAuth) {
+        return null;
+      }
+      if (!adminAuth.sessionTokenHash) {
+        throw new ValidationError('管理者ログインが必要です。', 401, 'UNAUTHORIZED');
+      }
+      const sess = stmts.getSessionAndUserByTokenHash.get(adminAuth.sessionTokenHash);
+      const nowIso = String(adminAuth.nowIso || new Date().toISOString());
+      if (!sess || String(sess.expires_at) <= nowIso) {
+        throw new ValidationError('セッションが失効または期限切れです。再ログインしてください。', 401, 'SESSION_EXPIRED');
+      }
+      if (
+        adminAuth.expectedUserId !== undefined &&
+        Number(sess.user_id) !== Number(adminAuth.expectedUserId)
+      ) {
+        throw new ValidationError('アカウント状態が変更されたため再ログインが必要です。', 401, 'SESSION_EXPIRED');
+      }
+      if (
+        adminAuth.expectedAuthVersion !== undefined &&
+        Number(sess.auth_version) !== Number(adminAuth.expectedAuthVersion)
+      ) {
+        throw new ValidationError('認証状態が変更されたため再ログインが必要です。', 401, 'SESSION_EXPIRED');
+      }
+      if (sess.role !== 'admin') {
+        throw new ValidationError('管理者権限が必要です。', 403, 'FORBIDDEN');
+      }
+      if (Boolean(sess.must_change_password)) {
+        throw new ValidationError(
+          '仮パスワードを変更して再ログインするまで管理操作はできません。',
+          403,
+          'PASSWORD_CHANGE_REQUIRED'
+        );
+      }
+      return {
+        actorType: 'admin_web',
+        actorUserId: Number(sess.user_id),
+        actorUsername: sess.username,
+      };
+    }
+
+    const FORBIDDEN_AUDIT_KEY_RE =
+      /^(?:password|pass|secret|token|cookie|auth|authorization|hash|bearer|signature|private_key|api_key)$|password|secret|token|cookie|hash|bearer|signature|private.?key|api.?key/i;
+
+    function sanitizeAuditValue(val, depth = 0) {
+      if (val === null || val === undefined) return null;
+      if (typeof val === 'number' || typeof val === 'boolean') return val;
+      if (typeof val === 'string') {
+        return val.length > 200 ? `${val.slice(0, 200)}...` : val;
+      }
+      if (depth >= 3) return '[nested]';
+      if (Array.isArray(val)) {
+        return val.slice(0, 20).map((item) => sanitizeAuditValue(item, depth + 1));
+      }
+      if (typeof val === 'object') {
+        const cleanObj = {};
+        for (const [k, v] of Object.entries(val)) {
+          if (FORBIDDEN_AUDIT_KEY_RE.test(k) || v === undefined) {
+            continue;
+          }
+          cleanObj[k] = sanitizeAuditValue(v, depth + 1);
+        }
+        return cleanObj;
+      }
+      return String(val);
+    }
+
+    function buildSafeAuditDetailJson(detail) {
+      const sanitized = sanitizeAuditValue(detail && typeof detail === 'object' ? detail : {});
+      let jsonStr = JSON.stringify(sanitized);
+      if (Buffer.byteLength(jsonStr, 'utf8') > 2048) {
+        const compact = {
+          truncated: true,
+          keys: Object.keys(sanitized && typeof sanitized === 'object' ? sanitized : {}).slice(0, 12),
+        };
+        jsonStr = JSON.stringify(compact);
+      }
+      return jsonStr;
+    }
+
+    function resolveAuditActorInTx(adminAuth, audit) {
+      const verifiedWebActor = assertActiveAdminInTx(adminAuth);
+      if (verifiedWebActor) {
+        return verifiedWebActor;
+      }
+      if (!audit) {
+        return null;
+      }
+      const actorType = audit.actorType === 'admin_web' ? 'admin_web' : 'cli';
+      const actorUserId =
+        Number.isSafeInteger(audit.actorUserId) && audit.actorUserId >= 1 ? audit.actorUserId : null;
+      const rawName = typeof audit.actorUsername === 'string' && audit.actorUsername.trim()
+        ? audit.actorUsername.trim()
+        : actorType === 'cli'
+          ? 'cli'
+          : 'admin';
+      const actorUsername = Array.from(rawName).slice(0, 64).join('');
+      return { actorType, actorUserId, actorUsername };
+    }
+
+    function recordAuditInTx(actor, { action, targetType, targetId, detail = {} }) {
+      if (!actor) {
+        return;
+      }
+      const detailJson = buildSafeAuditDetailJson(detail);
+      stmts.insertAdminAuditLog.run(
+        actor.actorType,
+        actor.actorUserId,
+        actor.actorUsername,
+        String(action),
+        String(targetType),
+        String(targetId),
+        detailJson
+      );
+    }
+
+    // -----------------------------------------------------------------
     // 4. 外部へ公開する操作メソッド群
     // -----------------------------------------------------------------
     return {
@@ -607,8 +867,9 @@ function createBoardDb(options = {}) {
       },
 
       // 管理者による論理削除（行と返信ツリー構造を残し、本文・名前を非表示化、ピン留めも解除する）
-      softDeletePost(postId) {
+      softDeletePost(postId, { adminAuth = null, audit = null } = {}) {
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const existing = stmts.getPostDeleteState.get(postId);
           if (!existing) {
             return { found: false, alreadyDeleted: false };
@@ -617,13 +878,20 @@ function createBoardDb(options = {}) {
             return { found: true, alreadyDeleted: true };
           }
           stmts.markPostDeleted.run(postId);
+          recordAuditInTx(actor, {
+            action: 'post_soft_delete',
+            targetType: 'post',
+            targetId: String(postId),
+            detail: { previousPinned: Boolean(existing.is_pinned) },
+          });
           return { found: true, alreadyDeleted: false };
         });
       },
 
       // 管理者による投稿ピン留め ON/OFF 設定（削除済み投稿のピン留めは拒否する）
-      setPostPinned(postId, isPinned) {
+      setPostPinned(postId, isPinned, { adminAuth = null, audit = null } = {}) {
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const existing = stmts.getPostDeleteState.get(postId);
           if (!existing) {
             return { found: false, isPinned: false };
@@ -632,16 +900,25 @@ function createBoardDb(options = {}) {
             throw new ValidationError('論理削除済みの投稿はピン留めできません。', 400);
           }
           const nextVal = isPinned ? 1 : 0;
-          stmts.updatePostPinned.run(nextVal, postId);
+          if (existing.is_pinned !== nextVal) {
+            stmts.updatePostPinned.run(nextVal, postId);
+            recordAuditInTx(actor, {
+              action: nextVal === 1 ? 'post_pin' : 'post_unpin',
+              targetType: 'post',
+              targetId: String(postId),
+              detail: { previousPinned: Boolean(existing.is_pinned), nextPinned: Boolean(nextVal) },
+            });
+          }
           return { found: true, isPinned: Boolean(nextVal) };
         });
       },
 
       // 管理者による通常コメント（投稿）の本文・投稿者名変更
       // 返信ツリー（parent_id）・ピン留め・visitor_id・作成日時は維持し、論理削除済み投稿の編集は拒否する
-      updatePost({ postId, content, authorName = undefined }) {
+      updatePost({ postId, content, authorName = undefined, adminAuth = null, audit = null }) {
         const validPostId = parsePositiveInt(postId, '投稿ID');
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const existing = toPlain(stmts.getPostWithThreadAndCategory.get(validPostId));
           if (!existing) {
             return { found: false, previousPost: null, post: null };
@@ -669,6 +946,12 @@ function createBoardDb(options = {}) {
           });
 
           stmts.updatePostById.run(validated.content, validated.authorName, validPostId);
+          recordAuditInTx(actor, {
+            action: 'post_update',
+            targetType: 'post',
+            targetId: String(validPostId),
+            detail: { threadId: existing.thread_id, previousAuthor: existing.author_name, nextAuthor: validated.authorName },
+          });
           return {
             found: true,
             previousPost: existing,
@@ -678,18 +961,17 @@ function createBoardDb(options = {}) {
       },
 
       // 管理者による新規カテゴリ追加（同名重複・空欄・30文字超過を検査し、displayOrder未指定時は末尾順を自動採番）
-      createCategory({ name, displayOrder = null }) {
+      createCategory({ name, displayOrder = null, adminAuth = null, audit = null }) {
         return runInTransaction(() => {
-          if (typeof name !== 'string' || /[\x00-\x1F\x7F]/.test(name)) {
-            throw new ValidationError('カテゴリ名に使用できない制御文字が含まれているか、形式が不正です。', 400);
-          }
-          const trimmed = name.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
-          if (trimmed.length < 1 || trimmed.length > 30) {
-            throw new ValidationError('カテゴリ名は1〜30文字で指定してください。', 400);
-          }
+          const actor = resolveAuditActorInTx(adminAuth, audit);
+          const trimmed = validateCategoryName(name);
           const duplicate = stmts.findCategoryByName.get(trimmed);
           if (duplicate) {
-            throw new ValidationError(`同名のカテゴリ「${trimmed}」が既に存在します（ID: ${duplicate.id}）。`, 400);
+            throw new ValidationError(
+              `同名のカテゴリ「${trimmed}」が既に存在します（ID: ${duplicate.id}）。`,
+              409,
+              'CATEGORY_ALREADY_EXISTS'
+            );
           }
 
           let orderVal;
@@ -697,20 +979,25 @@ function createBoardDb(options = {}) {
             const maxRow = stmts.getMaxCategoryOrder.get();
             orderVal = Number(maxRow?.max_order ?? 0) + 1;
           } else {
-            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
-              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
-            }
-            orderVal = displayOrder;
+            orderVal = validateNonNegativeInt(displayOrder, '表示順');
           }
 
           const info = stmts.insertCategory.run(trimmed, orderVal);
-          return toPlain(stmts.getCategoryById.get(Number(info.lastInsertRowid)));
+          const created = toPlain(stmts.getCategoryById.get(Number(info.lastInsertRowid)));
+          recordAuditInTx(actor, {
+            action: 'category_create',
+            targetType: 'category',
+            targetId: String(created.id),
+            detail: { name: created.name, displayOrder: created.display_order },
+          });
+          return created;
         });
       },
 
       // 管理者による既存カテゴリの名前・表示順変更（配下のスレッドや投稿は一切失われずそのまま維持される）
-      updateCategory({ categoryId, name = undefined, displayOrder = undefined }) {
+      updateCategory({ categoryId, name = undefined, displayOrder = undefined, adminAuth = null, audit = null }) {
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const existing = stmts.getCategoryById.get(categoryId);
           if (!existing) {
             return { found: false, category: null };
@@ -718,78 +1005,128 @@ function createBoardDb(options = {}) {
 
           let nextName = existing.name;
           if (name !== undefined && name !== null) {
-            if (typeof name !== 'string' || /[\x00-\x1F\x7F]/.test(name)) {
-              throw new ValidationError('カテゴリ名に使用できない制御文字が含まれているか、形式が不正です。', 400);
-            }
-            const trimmed = name.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
-            if (trimmed.length < 1 || trimmed.length > 30) {
-              throw new ValidationError('カテゴリ名は1〜30文字で指定してください。', 400);
-            }
+            const trimmed = validateCategoryName(name);
             const dup = stmts.findCategoryByName.get(trimmed);
             if (dup && Number(dup.id) !== Number(categoryId)) {
-              throw new ValidationError(`同名のカテゴリ「${trimmed}」が既に存在します（ID: ${dup.id}）。`, 400);
+              throw new ValidationError(
+                `同名のカテゴリ「${trimmed}」が既に存在します（ID: ${dup.id}）。`,
+                409,
+                'CATEGORY_ALREADY_EXISTS'
+              );
             }
             nextName = trimmed;
           }
 
           let nextOrder = existing.display_order;
           if (displayOrder !== undefined && displayOrder !== null) {
-            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
-              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
-            }
-            nextOrder = displayOrder;
+            nextOrder = validateNonNegativeInt(displayOrder, '表示順');
           }
 
           stmts.updateCategoryById.run(nextName, nextOrder, categoryId);
+          const updated = toPlain(stmts.getCategoryById.get(categoryId));
+          recordAuditInTx(actor, {
+            action: 'category_update',
+            targetType: 'category',
+            targetId: String(categoryId),
+            detail: {
+              beforeName: existing.name,
+              afterName: updated.name,
+              beforeOrder: existing.display_order,
+              afterOrder: updated.display_order,
+            },
+          });
           return {
             found: true,
-            category: toPlain(stmts.getCategoryById.get(categoryId)),
+            category: updated,
           };
         });
       },
 
-      // 管理者による新規スレッド追加（所属カテゴリの実在確認＋タイトル1〜100文字＋案内文500文字以内検査＋表示順採番）
-      createThread({ categoryId, title, pinnedText = null, isPinned = false, displayOrder = null }) {
+      // 管理者によるカテゴリ物理削除（配下にスレッドが残る場合 409 / 最後の1カテゴリ削除は 409 LAST_CATEGORY_PROTECTED）
+      deleteCategory(categoryId, { adminAuth = null, audit = null } = {}) {
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
+          const existing = toPlain(stmts.getCategoryById.get(categoryId));
+          if (!existing) {
+            return { found: false, deletedCategory: null };
+          }
+          const { cnt } = stmts.countThreadsInCategory.get(categoryId);
+          if (Number(cnt) > 0) {
+            throw new ValidationError(
+              `カテゴリ「${existing.name}」には ${cnt} 件のスレッドが残っているため削除できません。先に配下のスレッドを削除してください。`,
+              409,
+              'CATEGORY_NOT_EMPTY',
+              { threadsCount: Number(cnt) }
+            );
+          }
+          const totalCategories = Number(stmts.countCategories.get()?.cnt ?? 0);
+          if (totalCategories <= 1) {
+            throw new ValidationError(
+              '最後のカテゴリは削除できません。別カテゴリを追加するか、このカテゴリの名前を変更してください。',
+              409,
+              'LAST_CATEGORY_PROTECTED',
+              { categoriesCount: totalCategories }
+            );
+          }
+          stmts.deleteCategoryById.run(categoryId);
+          recordAuditInTx(actor, {
+            action: 'category_delete',
+            targetType: 'category',
+            targetId: String(categoryId),
+            detail: { name: existing.name, displayOrder: existing.display_order },
+          });
+          return { found: true, deletedCategory: existing };
+        });
+      },
+
+      // 管理者による新規スレッド追加（所属カテゴリの実在確認＋タイトル1〜100文字＋案内文500文字以内検査＋表示順採番）
+      // ※ P2-2対応：案内文は threads.pinned_text を単一データソースとし、既定では posts へ複製しない
+      createThread({
+        categoryId,
+        title,
+        pinnedText = null,
+        isPinned = false,
+        displayOrder = null,
+        createdBy = null,
+        createPinnedPost = false,
+        adminAuth = null,
+        audit = null,
+      }) {
+        return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const category = stmts.getCategoryById.get(categoryId);
           if (!category) {
             throw new ValidationError(`カテゴリ #${categoryId} は存在しません。`, 404);
           }
 
-          if (typeof title !== 'string' || /[\x00-\x1F\x7F]/.test(title)) {
-            throw new ValidationError('スレッドタイトルに使用できない制御文字が含まれているか、形式が不正です。', 400);
-          }
-          const trimmedTitle = title.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
-          if (trimmedTitle.length < 1 || trimmedTitle.length > 100) {
-            throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
-          }
+          const trimmedTitle = validateThreadTitle(title);
 
           let orderVal;
           if (displayOrder === null || displayOrder === undefined) {
             const maxRow = stmts.getMaxThreadOrderInCategory.get(categoryId);
             orderVal = Number(maxRow?.max_order ?? 0) + 1;
           } else {
-            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
-              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
-            }
-            orderVal = displayOrder;
+            orderVal = validateNonNegativeInt(displayOrder, '表示順');
           }
 
-          let normalizedPinText = null;
-          if (pinnedText !== null && pinnedText !== undefined && String(pinnedText).trim() !== '') {
-            const textStr = String(pinnedText).replace(/\r\n?/g, '\n').trim();
-            if (textStr.length > 500) {
-              throw new ValidationError('スレッド案内文（pinned_text）は500文字以内で指定してください。', 400);
-            }
-            normalizedPinText = textStr;
+          const normalizedPinText = validateThreadPinnedText(pinnedText);
+          if (typeof isPinned !== 'boolean') {
+            throw new ValidationError('isPinned には true または false を指定してください。', 400);
           }
 
-          const pinFlag = isPinned || normalizedPinText !== null ? 1 : 0;
-          const info = stmts.insertThread.run(categoryId, trimmedTitle, normalizedPinText, pinFlag, orderVal);
+          const pinFlag = isPinned ? 1 : 0;
+          const creatorUserId = createdBy ?? actor?.actorUserId ?? null;
+          const info = stmts.insertThread.run(
+            categoryId,
+            trimmedTitle,
+            normalizedPinText,
+            pinFlag,
+            orderVal,
+            creatorUserId
+          );
           const newThreadId = Number(info.lastInsertRowid);
 
-          // 案内文が指定された場合は、現行UIの「ピン留めされた投稿・返信」枠にも表示されるよう初期ピン留め投稿を作成する
-          if (normalizedPinText !== null) {
+          if (createPinnedPost && normalizedPinText !== null) {
             stmts.insertPostWithPin.run(
               newThreadId,
               null,
@@ -800,13 +1137,35 @@ function createBoardDb(options = {}) {
             );
           }
 
-          return toPlain(stmts.getThreadById.get(newThreadId));
+          const created = toPlain(stmts.getThreadById.get(newThreadId));
+          recordAuditInTx(actor, {
+            action: 'thread_create',
+            targetType: 'thread',
+            targetId: String(created.id),
+            detail: {
+              categoryId,
+              title: created.title,
+              isPinned: Boolean(created.is_pinned),
+              hasPinnedText: normalizedPinText !== null,
+              displayOrder: created.display_order,
+            },
+          });
+          return created;
         });
       },
 
-      // 管理者による既存スレッドのタイトル・表示順変更（配下の投稿ツリーは一切失われずそのまま維持される）
-      updateThread({ threadId, title = undefined, displayOrder = undefined }) {
+      // 管理者による既存スレッドのタイトル・案内文・ピン留め・表示順変更（P2拡張：pinnedText / isPinned 対応）
+      updateThread({
+        threadId,
+        title = undefined,
+        pinnedText = undefined,
+        isPinned = undefined,
+        displayOrder = undefined,
+        adminAuth = null,
+        audit = null,
+      }) {
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const existing = stmts.getThreadById.get(threadId);
           if (!existing) {
             return { found: false, thread: null };
@@ -814,28 +1173,46 @@ function createBoardDb(options = {}) {
 
           let nextTitle = existing.title;
           if (title !== undefined && title !== null) {
-            if (typeof title !== 'string' || /[\x00-\x1F\x7F]/.test(title)) {
-              throw new ValidationError('スレッドタイトルに使用できない制御文字が含まれているか、形式が不正です。', 400);
+            nextTitle = validateThreadTitle(title);
+          }
+
+          let nextPinnedText = existing.pinned_text ?? null;
+          if (pinnedText !== undefined) {
+            nextPinnedText = validateThreadPinnedText(pinnedText);
+          }
+
+          let nextIsPinned = existing.is_pinned ? 1 : 0;
+          if (isPinned !== undefined) {
+            if (typeof isPinned !== 'boolean') {
+              throw new ValidationError('isPinned には true または false を指定してください。', 400);
             }
-            const trimmedTitle = title.replace(/^[\s\u3000]+|[\s\u3000]+$/g, '');
-            if (trimmedTitle.length < 1 || trimmedTitle.length > 100) {
-              throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
-            }
-            nextTitle = trimmedTitle;
+            nextIsPinned = isPinned ? 1 : 0;
           }
 
           let nextOrder = existing.display_order ?? 0;
           if (displayOrder !== undefined && displayOrder !== null) {
-            if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
-              throw new ValidationError('表示順（display_order）は0以上の整数で指定してください。', 400);
-            }
-            nextOrder = displayOrder;
+            nextOrder = validateNonNegativeInt(displayOrder, '表示順');
           }
 
-          stmts.updateThreadById.run(nextTitle, existing.pinned_text, existing.is_pinned, nextOrder, threadId);
+          stmts.updateThreadById.run(nextTitle, nextPinnedText, nextIsPinned, nextOrder, threadId);
+          const updated = toPlain(stmts.getThreadById.get(threadId));
+          recordAuditInTx(actor, {
+            action: 'thread_update',
+            targetType: 'thread',
+            targetId: String(threadId),
+            detail: {
+              beforeTitle: existing.title,
+              afterTitle: updated.title,
+              pinnedTextChanged: (existing.pinned_text ?? null) !== (updated.pinned_text ?? null),
+              beforePinned: Boolean(existing.is_pinned),
+              afterPinned: Boolean(updated.is_pinned),
+              beforeOrder: existing.display_order,
+              afterOrder: updated.display_order,
+            },
+          });
           return {
             found: true,
-            thread: toPlain(stmts.getThreadById.get(threadId)),
+            thread: updated,
           };
         });
       },
@@ -874,7 +1251,8 @@ function createBoardDb(options = {}) {
                 threadDef.title,
                 threadDef.pinnedText ?? null,
                 threadDef.isPinned ? 1 : 0,
-                threadDef.displayOrder ?? 0
+                threadDef.displayOrder ?? 0,
+                null
               );
               const newThreadId = Number(threadInfo.lastInsertRowid);
               createdThreads += 1;
@@ -927,8 +1305,9 @@ function createBoardDb(options = {}) {
         };
       },
 
-      purgePostTree(postId) {
+      purgePostTree(postId, { adminAuth = null, audit = null } = {}) {
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const rootPost = toPlain(stmts.getPostWithThreadAndCategory.get(postId));
           if (!rootPost) {
             return { found: false, deletedCount: 0, deletedIds: [] };
@@ -939,6 +1318,12 @@ function createBoardDb(options = {}) {
             stmts.deletePostById.run(p.id);
             deletedIds.push(p.id);
           }
+          recordAuditInTx(actor, {
+            action: 'post_purge_tree',
+            targetType: 'post',
+            targetId: String(postId),
+            detail: { threadId: rootPost.thread_id, deletedCount: deletedIds.length },
+          });
           return {
             found: true,
             rootPost,
@@ -966,19 +1351,59 @@ function createBoardDb(options = {}) {
         };
       },
 
-      purgeThread(threadId) {
+      purgeThread(threadId, options = {}) {
+        const {
+          requireConfirmation = false,
+          confirmTitle = undefined,
+          expectedPostCount = undefined,
+          adminAuth = null,
+          audit = null,
+        } = options;
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const thread = toPlain(stmts.getThreadWithCategory.get(threadId));
           if (!thread) {
             return { found: false, deletedPostsCount: 0, deletedPostIds: [] };
           }
           const posts = stmts.getThreadPostsInLeafOrder.all(threadId, threadId).map(toPlain);
+
+          if (requireConfirmation || confirmTitle !== undefined || expectedPostCount !== undefined) {
+            if (typeof confirmTitle !== 'string' || confirmTitle.trim() !== thread.title) {
+              throw new ValidationError(
+                '確認用のスレッドタイトルが一致しません。対象スレッド名を正確に入力してください。',
+                400,
+                'CONFIRM_TITLE_MISMATCH'
+              );
+            }
+            if (!Number.isSafeInteger(expectedPostCount) || expectedPostCount < 0) {
+              throw new ValidationError('確認時の投稿件数（expectedPostCount）が不正です。', 400);
+            }
+            if (posts.length !== expectedPostCount) {
+              throw new ValidationError(
+                `確認画面を開いた後に投稿数が変化しました（確認時: ${expectedPostCount}件 / 最新: ${posts.length}件）。最新件数を確認してから再実行してください。`,
+                409,
+                'THREAD_POST_COUNT_CHANGED',
+                { expectedPostCount, actualPostsCount: posts.length, threadTitle: thread.title }
+              );
+            }
+          }
+
           const deletedPostIds = [];
           for (const p of posts) {
             stmts.deletePostById.run(p.id);
             deletedPostIds.push(p.id);
           }
           stmts.deleteThreadById.run(threadId);
+          recordAuditInTx(actor, {
+            action: 'thread_purge',
+            targetType: 'thread',
+            targetId: String(threadId),
+            detail: {
+              categoryId: thread.category_id,
+              title: thread.title,
+              deletedPostsCount: deletedPostIds.length,
+            },
+          });
           return {
             found: true,
             deletedThread: thread,
@@ -995,49 +1420,7 @@ function createBoardDb(options = {}) {
         if (dest === targetPath) {
           throw new Error('バックアップ先に元のDBと同じパスは指定できません。');
         }
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-
-        const tmpDest = `${dest}.tmp-${process.pid}-${Date.now()}-${Math.random()
-          .toString(16)
-          .slice(2, 8)}`;
-        const escapedTmp = tmpDest.replace(/'/g, "''");
-
-        try {
-          sqlite.exec(`VACUUM INTO '${escapedTmp}';`);
-
-          // 生成された新世代バックアップの整合性と代表テーブルの読取可能性を検証してから切り替える
-          const checkDb = new DatabaseSync(tmpDest, { readOnly: true });
-          try {
-            const qc = checkDb.prepare('PRAGMA quick_check;').get();
-            if (!qc || String(qc.quick_check).toLowerCase() !== 'ok') {
-              throw new Error('生成されたバックアップファイルの整合性検査（quick_check）に失敗しました。');
-            }
-            const fk = checkDb.prepare('PRAGMA foreign_key_check;').all();
-            if (fk && fk.length > 0) {
-              throw new Error('生成されたバックアップファイルで外部キー制約違反（foreign_key_check）が検出されました。');
-            }
-            const catCount = checkDb.prepare('SELECT COUNT(*) AS c FROM categories;').get();
-            checkDb.prepare('SELECT COUNT(*) AS c FROM threads;').get();
-            checkDb.prepare('SELECT COUNT(*) AS c FROM posts;').get();
-            if (options.requireNonEmptyCategories && Number(catCount?.c ?? 0) === 0) {
-              throw new Error('バックアップ対象DBのカテゴリ件数が0件です。空のDBで既存バックアップを上書きすることを拒否しました。');
-            }
-          } finally {
-            checkDb.close();
-          }
-
-          fs.renameSync(tmpDest, dest);
-          return dest;
-        } catch (err) {
-          try {
-            if (fs.existsSync(tmpDest)) {
-              fs.unlinkSync(tmpDest);
-            }
-          } catch {
-            // 一時ファイル掃除失敗は無視し、元の例外を優先して投げる
-          }
-          throw err;
-        }
+        return vacuumSqliteConnectionToFile(sqlite, dest, options);
       },
 
       // ---------------------------------------------------------------
@@ -1075,10 +1458,108 @@ function createBoardDb(options = {}) {
         });
       },
 
-      createUser({ username, passwordHash, role = 'user', mustChangePassword = false }) {
+      // ---------------------------------------------------------------
+      // 管理MVP用 参照・一覧API（ページング＆最小DTO・秘密除外）
+      // ---------------------------------------------------------------
+      getAdminOverview() {
+        const categories = stmts.listCategories.all().map((c) => ({
+          ...c,
+          threads: [],
+        }));
+        const categoryMap = new Map(categories.map((c) => [c.id, c]));
+        const threads = stmts.listAdminThreadsSummary.all();
+        for (const t of threads) {
+          const parentCat = categoryMap.get(t.category_id);
+          if (parentCat) {
+            parentCat.threads.push({ ...t });
+          }
+        }
+        return {
+          summary: {
+            categoriesCount: Number(stmts.countCategories.get()?.cnt ?? 0),
+            threadsCount: Number(stmts.countThreads.get()?.cnt ?? 0),
+            postsCount: Number(stmts.countPostsTotal.get()?.cnt ?? 0),
+            usersCount: Number(stmts.countUsersTotal.get()?.cnt ?? 0),
+            adminsCount: Number(stmts.countAdminUsers.get()?.cnt ?? 0),
+          },
+          categories,
+        };
+      },
+
+      getAdminThreadPosts(threadId) {
+        const thread = toPlain(stmts.getThreadWithCategory.get(threadId));
+        if (!thread) {
+          return null;
+        }
+        const posts = stmts.listPublicPostsByThread
+          .all(threadId, maxPostsPerThread)
+          .map(toPublicPost);
+        return { thread, posts };
+      },
+
+      listAdminUsers({ limit = 50, offset = 0, nowIso = new Date().toISOString() } = {}) {
+        const safeLimit = parsePaginationLimit(limit, { defaultLimit: 50, maxLimit: 100 });
+        const safeOffset = parsePaginationOffset(offset);
+        const total = Number(stmts.countUsersTotal.get()?.cnt ?? 0);
+        const users = stmts.listAdminUsersPaged.all(nowIso, safeLimit, safeOffset).map((row) => ({
+          id: Number(row.id),
+          username: row.username,
+          role: row.role,
+          mustChangePassword: Boolean(row.must_change_password),
+          activeSessions: Number(row.active_sessions),
+          createdAt: row.created_at,
+        }));
+        return {
+          users,
+          total,
+          limit: safeLimit,
+          offset: safeOffset,
+        };
+      },
+
+      listAdminAuditLogs({ limit = 50, beforeId = null } = {}) {
+        const safeLimit = parsePaginationLimit(limit, { defaultLimit: 50, maxLimit: 100 });
+        const parsedBefore =
+          beforeId !== null && beforeId !== undefined && beforeId !== ''
+            ? parsePositiveInt(beforeId, 'カーソルID(before_id)')
+            : null;
+        const rows = parsedBefore !== null
+          ? stmts.listAdminAuditLogsBefore.all(parsedBefore, safeLimit + 1)
+          : stmts.listAdminAuditLogsInitial.all(safeLimit + 1);
+        const hasMore = rows.length > safeLimit;
+        const slice = hasMore ? rows.slice(0, safeLimit) : rows;
+        const logs = slice.map((row) => {
+          let detail = {};
+          try {
+            detail = JSON.parse(row.detail_json);
+          } catch {
+            detail = {};
+          }
+          return {
+            id: Number(row.id),
+            actorType: row.actor_type,
+            actorUserId: row.actor_user_id === null ? null : Number(row.actor_user_id),
+            actorUsername: row.actor_username,
+            action: row.action,
+            targetType: row.target_type,
+            targetId: row.target_id,
+            detail,
+            createdAt: row.created_at,
+          };
+        });
+        return {
+          logs,
+          hasMore,
+          nextBeforeId: logs.length > 0 ? logs[logs.length - 1].id : null,
+          limit: safeLimit,
+        };
+      },
+
+      createUser({ username, passwordHash, role = 'user', mustChangePassword = false, adminAuth = null, audit = null }) {
         const cleanUsername = validateUsername(username);
         const cleanRole = validateUserRole(role);
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           try {
             const info = stmts.insertUser.run(
               cleanUsername,
@@ -1087,7 +1568,14 @@ function createBoardDb(options = {}) {
               mustChangePassword ? 1 : 0
             );
             const userId = Number(info.lastInsertRowid);
-            return toPublicUser(stmts.getUserById.get(userId));
+            const created = toPublicUser(stmts.getUserById.get(userId));
+            recordAuditInTx(actor, {
+              action: 'user_create',
+              targetType: 'user',
+              targetId: String(userId),
+              detail: { username: cleanUsername, role: cleanRole },
+            });
+            return created;
           } catch (err) {
             if (isUniqueConstraintError(err)) {
               throw new ValidationError(`ユーザー名「${cleanUsername}」は既に登録されています。`, 409);
@@ -1198,9 +1686,10 @@ function createBoardDb(options = {}) {
         });
       },
 
-      resetPasswordByUsername({ username, newPasswordHash }) {
+      resetPasswordByUsername({ username, newPasswordHash, reason = '', adminAuth = null, audit = null }) {
         const cleanUsername = validateUsername(username);
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const user = stmts.getUserByUsername.get(cleanUsername);
           if (!user) {
             return { found: false, user: null };
@@ -1208,6 +1697,16 @@ function createBoardDb(options = {}) {
           stmts.updatePasswordAndBumpVersion.run(newPasswordHash, 1, user.id);
           const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
           const updated = stmts.getUserById.get(user.id);
+          recordAuditInTx(actor, {
+            action: 'user_reset_password',
+            targetType: 'user',
+            targetId: String(user.id),
+            detail: {
+              username: user.username,
+              revokedSessions: Number(deletedInfo.changes ?? 0),
+              ...(reason ? { reason } : {}),
+            },
+          });
           return {
             found: true,
             revokedSessions: Number(deletedInfo.changes ?? 0),
@@ -1216,28 +1715,61 @@ function createBoardDb(options = {}) {
         });
       },
 
-      setUserRoleByUsername({ username, role }) {
+      setUserRoleByUsername({ username, role, adminAuth = null, audit = null }) {
         const cleanUsername = validateUsername(username);
         const cleanRole = validateUserRole(role);
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const user = stmts.getUserByUsername.get(cleanUsername);
           if (!user) {
             return { found: false, user: null };
           }
+          // R2: CLI・Web管理共用の最後の管理者保護（降格後の admin が 0 人になる操作を拒否）
+          if (user.role === 'admin' && cleanRole !== 'admin') {
+            const { cnt } = stmts.countAdminUsers.get();
+            if (Number(cnt) <= 1) {
+              throw new ValidationError(
+                '最後の管理者（admin）を一般会員へ降格することはできません。',
+                409,
+                'LAST_ADMIN_PROTECTED'
+              );
+            }
+          }
+          if (user.role === cleanRole) {
+            return {
+              found: true,
+              unchanged: true,
+              revokedSessions: 0,
+              user: toPublicUser(user),
+            };
+          }
           stmts.updateRoleAndBumpVersion.run(cleanRole, user.id);
           const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
           const updated = stmts.getUserById.get(user.id);
+          recordAuditInTx(actor, {
+            action: 'user_role_change',
+            targetType: 'user',
+            targetId: String(user.id),
+            detail: {
+              username: user.username,
+              beforeRole: user.role,
+              afterRole: cleanRole,
+              revokedSessions: Number(deletedInfo.changes ?? 0),
+            },
+          });
           return {
             found: true,
+            unchanged: false,
             revokedSessions: Number(deletedInfo.changes ?? 0),
             user: toPublicUser(updated),
           };
         });
       },
 
-      revokeAllSessionsByUsername(username) {
+      revokeAllSessionsByUsername(username, { adminAuth = null, audit = null } = {}) {
         const cleanUsername = validateUsername(username);
         return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
           const user = stmts.getUserByUsername.get(cleanUsername);
           if (!user) {
             return { found: false, revokedSessions: 0, user: null };
@@ -1245,6 +1777,15 @@ function createBoardDb(options = {}) {
           stmts.bumpUserAuthVersion.run(user.id);
           const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
           const updated = stmts.getUserById.get(user.id);
+          recordAuditInTx(actor, {
+            action: 'user_revoke_sessions',
+            targetType: 'user',
+            targetId: String(user.id),
+            detail: {
+              username: user.username,
+              revokedSessions: Number(deletedInfo.changes ?? 0),
+            },
+          });
           return {
             found: true,
             revokedSessions: Number(deletedInfo.changes ?? 0),
@@ -1282,8 +1823,10 @@ function createBoardDb(options = {}) {
 module.exports = {
   PROJECT_ROOT,
   DEFAULT_SCHEMA_PATH,
+  TARGET_SCHEMA_VERSION,
   DEFAULT_MAX_POSTS_PER_THREAD,
   DEFAULT_MAX_REPLY_DEPTH,
   resolveProjectDbPath,
+  vacuumSqliteConnectionToFile,
   createBoardDb,
 };

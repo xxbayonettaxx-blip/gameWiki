@@ -14,7 +14,7 @@ const { runSeed } = require('../src/seed');
 const { createApp } = require('../src/app');
 const { createScryptQueue } = require('../src/auth');
 
-test('実ブラウザで下書き・遅延応答・入力シートを検証する', { timeout: 60000 }, async (t) => {
+test('実ブラウザで下書き・遅延応答・入力シートを検証する', { timeout: 90000 }, async (t) => {
   const browserPath = process.env.CHROME_PATH || [
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
@@ -40,7 +40,24 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
   let finishBootstrap = null;
   let failBootstrapStatus = 0;
   let seenBootApiCalls = [];
+  let holdAdminPostsThreadId = null;
+  let finishHeldAdminPosts = null;
+  const seenBoardUrlsBeforeAdmin = [];
+  let stopRecordingBoardUrls = false;
   server.prependListener('request', (req, res) => {
+    if (!stopRecordingBoardUrls) {
+      seenBoardUrlsBeforeAdmin.push(req.url);
+    }
+    if (
+      holdAdminPostsThreadId !== null &&
+      req.url === `/board/api/admin/threads/${holdAdminPostsThreadId}/posts`
+    ) {
+      const originalEnd = res.end;
+      res.end = function (...args) {
+        finishHeldAdminPosts = () => originalEnd.apply(res, args);
+        return res;
+      };
+    }
     if (
       req.url.startsWith('/board/api/bootstrap') ||
       req.url.startsWith('/board/api/categories') ||
@@ -98,6 +115,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
   t.after(async () => {
     finishBootstrap?.();
     finishPost?.();
+    finishHeldAdminPosts?.();
     socket?.close();
     if (browser.exitCode === null) {
       const exited = once(browser, 'exit');
@@ -1106,7 +1124,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
   });
 
-  await t.test('レビュー回帰(R1): 古いbootstrap応答が登録・ログアウト後の認証表示を上書きしないこと・版表示v1.0.1確認', async () => {
+  await t.test('レビュー回帰(R1): 古いbootstrap応答が登録・ログアウト後の認証表示を上書きしないこと・版表示v1.1.0確認', async () => {
     const setField = async (selector, value) => {
       await evaluate(
         `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
@@ -1172,15 +1190,15 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'ログイン');
     assert.equal(await evaluate("fetch('api/auth/me').then((r) => r.json()).then((d) => d.user)"), null);
 
-    // 3. 版表示が v1.0.1 に統一され v0.5 が残っていないこと
+    // 3. 版表示が v1.1.0 に統一され v1.0.1 / v0.5 が残っていないこと
     const versionText = await evaluate(`({
       sidebar: document.querySelector('.sidebar-bottom')?.textContent || '',
       footer: document.querySelector('.page-footer')?.textContent || '',
       badge: document.querySelector('.footer-version')?.textContent || '',
     })`);
-    assert.ok(versionText.sidebar.includes('v1.0.1') && !versionText.sidebar.includes('v0.5'), JSON.stringify(versionText));
-    assert.ok(versionText.footer.includes('v1.0.1') && !versionText.footer.includes('v0.5'), JSON.stringify(versionText));
-    assert.ok(versionText.badge.includes('v1.0.1') && !versionText.badge.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.sidebar.includes('v1.1.0') && !versionText.sidebar.includes('v1.0.1') && !versionText.sidebar.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.footer.includes('v1.1.0') && !versionText.footer.includes('v1.0.1') && !versionText.footer.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.badge.includes('v1.1.0') && !versionText.badge.includes('v1.0.1') && !versionText.badge.includes('v0.5'), JSON.stringify(versionText));
   });
 
   await t.test('実機回帰(ID14): 別タブログアウトでCookie消失後の送信が暗黙匿名化されず下書き保持→再ログイン継続できること', async () => {
@@ -1335,6 +1353,296 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
 
     await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
     await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  });
+
+  await t.test('v1.1管理MVP(Browser E2E): 一般画面でadmin.js未読込・非管理者遮断・管理CRUD/削除競合409/Esc復帰/監査閲覧', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+    const pressKey = async (key, code, keyCode) => {
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key,
+        code,
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key,
+        code,
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+      });
+    };
+
+    // 1. これまでの一般画面操作で admin.js / admin.css が 1度も読み込まれていないこと (KPI: 0回)
+    stopRecordingBoardUrls = true;
+    const leakedAdminAssets = seenBoardUrlsBeforeAdmin.filter(
+      (u) => u.includes('admin.js') || u.includes('admin.css') || u.includes('admin.html')
+    );
+    assert.deepEqual(leakedAdminAssets, []);
+
+    // 一般ゲストで #admin-page-link は非表示、直リンク admin.html もゲート止まり
+    assert.equal(await evaluate("document.querySelector('#admin-page-link').hidden"), true);
+    await send('Page.navigate', { url: url + 'admin.html' });
+    await waitFor("document.querySelector('#admin-gate-message')?.textContent && !document.querySelector('#admin-gate-message').textContent.includes('確認しています')");
+    assert.equal(await evaluate("document.querySelector('#admin-workspace').hidden"), true);
+    assert.equal(await evaluate("document.querySelector('#admin-auth-gate').hidden"), false);
+
+    // 2. 一般会員(user)でログイン → #admin-page-link 非表示・admin.html でも 403 ゲート止まり
+    await send('Page.navigate', { url });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', 'race_reg_user');
+    await setField('#login-password', 'race-reg-pass-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#admin-page-link').hidden"), true);
+
+    await send('Page.navigate', { url: url + 'admin.html' });
+    await waitFor("document.querySelector('#admin-gate-message')?.textContent.includes('管理者権限')");
+    assert.equal(await evaluate("document.querySelector('#admin-workspace').hidden"), true);
+
+    // 3. admin へ昇格して一般画面から再ログイン → #admin-page-link 表示 → 管理画面へ遷移
+    await send('Page.navigate', { url });
+    await waitFor("document.querySelector('#thread-title')?.textContent === '雑談'");
+    db.setUserRoleByUsername({ username: 'race_reg_user', role: 'admin' });
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    await setField('#login-username', 'race_reg_user');
+    await setField('#login-password', 'race-reg-pass-1234');
+    await evaluate("document.querySelector('#login-form').requestSubmit()");
+    await waitFor("document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+    await click('#auth-open');
+    await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+    assert.equal(await evaluate("document.querySelector('#admin-page-link').hidden"), false);
+    await click('#admin-page-link');
+    await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+    assert.ok((await evaluate("document.querySelector('#admin-operator-badge').textContent")).includes('race_reg_user'));
+
+    // 4. カテゴリ追加・スレッド追加・スレッド編集(pinnedText/isPinned)＋P2-2一般画面単一ソース案内表示
+    await setField('#new-cat-name', 'E2E管理カテゴリ');
+    await evaluate("document.querySelector('#create-category-form').requestSubmit()");
+    await waitFor("document.querySelector('#structure-list')?.textContent.includes('E2E管理カテゴリ')");
+
+    const createdCat = db.listCategoriesWithThreads().find((c) => c.name === 'E2E管理カテゴリ');
+    assert.ok(createdCat);
+    await evaluate(`document.querySelector('#new-thread-cat').value = ${JSON.stringify(String(createdCat.id))}`);
+    await setField('#new-thread-title', 'E2E新規スレ');
+    await setField('#new-thread-pinned-text', 'E2E初期案内文');
+    await evaluate("document.querySelector('#create-thread-form').requestSubmit()");
+    await waitFor("document.querySelector('#structure-list')?.textContent.includes('E2E新規スレ')");
+
+    const createdTh = db.listCategoriesWithThreads().find((c) => c.id === createdCat.id).threads[0];
+    assert.ok(createdTh);
+    const guideNormalPin = db.createPost({
+      threadId: createdTh.id,
+      authorName: '常連ガイド',
+      visitorId: 'e2e_pin',
+      content: '通常ピン投稿は案内文変更後も維持されること',
+    });
+    db.setPostPinned(guideNormalPin.id, true);
+    assert.equal(db.getThreadDetail(createdTh.id).posts.length, 1);
+
+    // 4a. 一般画面で #thread-guide に新規スレッドの案内文が表示され、320px幅でも横はみ出しゼロであること
+    await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 640, deviceScaleFactor: 1, mobile: true });
+    await send('Page.navigate', { url: `${url}#thread-${createdTh.id}` });
+    await waitFor("document.querySelector('#thread-title')?.textContent === 'E2E新規スレ'");
+    const initialGuideState = await evaluate(`({
+      hidden: document.querySelector('#thread-guide').hidden,
+      text: document.querySelector('#thread-guide-text').textContent,
+      pinnedText: document.querySelector('#pinned-comments').textContent,
+      clientW: document.documentElement.clientWidth,
+      scrollW: document.documentElement.scrollWidth,
+    })`);
+    assert.equal(initialGuideState.hidden, false);
+    assert.equal(initialGuideState.text, 'E2E初期案内文');
+    assert.ok(initialGuideState.pinnedText.includes('通常ピン投稿は案内文変更後も維持されること'));
+    assert.equal(initialGuideState.pinnedText.includes('E2E初期案内文'), false);
+    assert.ok(initialGuideState.scrollW <= initialGuideState.clientW, JSON.stringify(initialGuideState));
+
+    // 4b. 管理画面でタイトルと案内文を更新 -> 一般画面の案内枠に即反映（通常ピン投稿は無傷）
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: url + 'admin.html' });
+    await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+    await setField(`[data-thread-title-input="${createdTh.id}"]`, 'E2E改訂スレ');
+    await setField(`[data-thread-pinned-text-input="${createdTh.id}"]`, 'E2E改訂案内文');
+    await evaluate(`document.querySelector('[data-thread-pinned-input="${createdTh.id}"]').checked = false`);
+    await click(`[data-action="save-thread"][data-thread-id="${createdTh.id}"]`);
+    await waitFor("document.querySelector('#structure-list')?.textContent.includes('E2E改訂スレ')");
+    const savedTh = db.getAdminOverview().categories.find((c) => c.id === createdCat.id).threads[0];
+    assert.equal(savedTh.title, 'E2E改訂スレ');
+    assert.equal(savedTh.pinned_text, 'E2E改訂案内文');
+    assert.equal(savedTh.is_pinned, 0);
+
+    await send('Page.navigate', { url: `${url}#thread-${createdTh.id}` });
+    await waitFor("document.querySelector('#thread-title')?.textContent === 'E2E改訂スレ'");
+    assert.equal(await evaluate("document.querySelector('#thread-guide').hidden"), false);
+    assert.equal(await evaluate("document.querySelector('#thread-guide-text').textContent"), 'E2E改訂案内文');
+    assert.ok((await evaluate("document.querySelector('#pinned-comments').textContent")).includes('通常ピン投稿は案内文変更後も維持されること'));
+
+    // 4c. 管理画面で案内文を消去 -> 一般画面の案内枠は非表示になり、通常ピン投稿のみ維持されること
+    await send('Page.navigate', { url: url + 'admin.html' });
+    await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+    await setField(`[data-thread-pinned-text-input="${createdTh.id}"]`, '');
+    await click(`[data-action="save-thread"][data-thread-id="${createdTh.id}"]`);
+    await waitFor("document.querySelector('#toast')?.textContent.includes('保存しました')");
+    assert.equal(db.getThreadDetail(createdTh.id).thread.pinned_text, null);
+
+    await send('Page.navigate', { url: `${url}#thread-${createdTh.id}` });
+    await waitFor("document.querySelector('#thread-title')?.textContent === 'E2E改訂スレ'");
+    assert.equal(await evaluate("document.querySelector('#thread-guide').hidden"), true);
+    assert.equal(await evaluate("document.querySelector('#thread-guide-text').textContent"), '');
+    assert.ok((await evaluate("document.querySelector('#pinned-comments').textContent")).includes('通常ピン投稿は案内文変更後も維持されること'));
+
+    await send('Page.navigate', { url: url + 'admin.html' });
+    await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+
+    // 5. スレッド削除ダイアログ: Esc閉じる＆トリガーへフォーカス復帰 + 直前投稿増加(409)再確認→削除
+    await click(`[data-action="purge-thread"][data-thread-id="${createdTh.id}"]`);
+    await waitFor("document.querySelector('#purge-thread-dialog').open === true");
+    await pressKey('Escape', 'Escape', 27);
+    await waitFor("document.querySelector('#purge-thread-dialog').open === false");
+    assert.equal(
+      await evaluate(`document.activeElement?.getAttribute('data-action') + ':' + document.activeElement?.getAttribute('data-thread-id')`),
+      `purge-thread:${createdTh.id}`
+    );
+
+    await click(`[data-action="purge-thread"][data-thread-id="${createdTh.id}"]`);
+    await waitFor("document.querySelector('#purge-thread-dialog').open === true && document.querySelector('#purge-target-count')?.textContent.includes('1 件')");
+    db.createPost({
+      threadId: createdTh.id,
+      authorName: '割り込み投稿者',
+      visitorId: 'e2e_race',
+      content: '確認中に追加された投稿',
+    });
+    await setField('#purge-confirm-input', 'E2E改訂スレ');
+    await evaluate("document.querySelector('#purge-thread-form').requestSubmit()");
+    await waitFor("document.querySelector('#purge-dialog-error')?.textContent.includes('投稿数が変化')");
+    assert.ok((await evaluate("document.querySelector('#purge-target-count').textContent")).includes('2 件'));
+
+    await evaluate("document.querySelector('#purge-thread-form').requestSubmit()");
+    await waitFor("document.querySelector('#purge-thread-dialog').open === false && !document.querySelector('#structure-list')?.textContent.includes('E2E改訂スレ')");
+
+    // 空カテゴリ削除も確認ダイアログから実行
+    await click(`[data-action="delete-category"][data-category-id="${createdCat.id}"]`);
+    await waitFor("document.querySelector('#delete-category-dialog').open === true");
+    await evaluate("document.querySelector('#delete-category-form').requestSubmit()");
+    await waitFor("!document.querySelector('#structure-list')?.textContent.includes('E2E管理カテゴリ')");
+
+    // 6a. P2-1回帰: スレッド切替中の旧一覧操作遮断 ＋ 応答順逆転(A遅延・B先行完了→A遅延完了)でもBのみ表示・操作されること
+    const racePostA = db.createPost({
+      threadId: 1,
+      authorName: 'レース検証A',
+      visitorId: 'race_a',
+      content: 'スレッド1固有のレース確認投稿A',
+    });
+    const racePostB = db.createPost({
+      threadId: 2,
+      authorName: 'レース検証B',
+      visitorId: 'race_b',
+      content: 'スレッド2固有のレース確認投稿B',
+    });
+    const selectModThread = (tid) =>
+      evaluate(
+        `(() => { const s = document.querySelector('#mod-thread-select'); s.value = ${JSON.stringify(String(tid))}; s.dispatchEvent(new Event('change', { bubbles: true })); })()`
+      );
+    await click('#tab-btn-posts');
+    await selectModThread(2);
+    await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('スレッド2固有のレース確認投稿B')");
+
+    // サーバー側で Thread 1 を保留し、Thread 1 切替中は旧一覧(Thread 2)のボタンが即消えることを確認
+    holdAdminPostsThreadId = 1;
+    finishHeldAdminPosts = null;
+    await selectModThread(1);
+    await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('読み込み中')");
+    assert.equal(await evaluate("document.querySelectorAll('#mod-posts-list button').length"), 0);
+
+    // 保留中に Thread 2 へ切り替え → Thread 2 の投稿が表示されたあと Thread 1 サーバー応答を開放
+    await selectModThread(2);
+    await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('スレッド2固有のレース確認投稿B')");
+    holdAdminPostsThreadId = null;
+    finishHeldAdminPosts?.();
+    finishHeldAdminPosts = null;
+    await delay(80);
+    assert.equal(await evaluate("document.querySelector('#mod-posts-list').textContent.includes('スレッド1固有のレース確認投稿A')"), false);
+
+    // さらに Abort を無視する遅延応答でも reqSeq + selectedModThreadId 検査により B だけが残ること（逆転応答）
+    await evaluate(`(() => {
+      window.__adminRaceOrigFetch = window.fetch;
+      let releaseA = null;
+      window.__releaseAdminRaceA = () => releaseA?.();
+      window.fetch = (input, init) => {
+        const u = String(input);
+        if (u.includes('/api/admin/threads/1/posts')) {
+          return window.__adminRaceOrigFetch(input, { ...init, signal: undefined }).then(
+            (resp) => new Promise((resolve) => { releaseA = () => resolve(resp); })
+          );
+        }
+        return window.__adminRaceOrigFetch(input, init);
+      };
+    })()`);
+    try {
+      await selectModThread(1);
+      await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('読み込み中')");
+      await selectModThread(2);
+      await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('スレッド2固有のレース確認投稿B')");
+      await evaluate("window.__releaseAdminRaceA()");
+      await delay(80);
+    } finally {
+      await evaluate("if (window.__adminRaceOrigFetch) { window.fetch = window.__adminRaceOrigFetch; delete window.__adminRaceOrigFetch; delete window.__releaseAdminRaceA; }");
+    }
+
+    assert.equal(await evaluate("document.querySelector('#mod-thread-select').value"), '2');
+    const raceFinalText = await evaluate("document.querySelector('#mod-posts-list').textContent");
+    assert.equal(raceFinalText.includes('スレッド2固有のレース確認投稿B'), true);
+    assert.equal(raceFinalText.includes('スレッド1固有のレース確認投稿A'), false);
+    assert.equal(await evaluate(`Boolean(document.querySelector('[data-action="soft-delete-post"][data-post-id="${racePostA.id}"]'))`), false);
+    await click(`[data-action="soft-delete-post"][data-post-id="${racePostB.id}"]`);
+    await waitFor(`document.querySelector('[data-action="soft-delete-post"][data-post-id="${racePostB.id}"]')?.disabled === true`);
+    assert.equal(db.getThreadDetail(2).posts.find((p) => p.id === racePostB.id).is_deleted, 1);
+    assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === racePostA.id).is_deleted, 0);
+
+    // 6b. Thread 1 を対象に戻し構造タブへ移動後、キーボード ArrowRight で投稿モデレーションタブへ切替 → 投稿ピン＆論理削除
+    await selectModThread(1);
+    await waitFor("document.querySelector('#mod-posts-list')?.textContent.includes('スレッド1固有のレース確認投稿A')");
+    await click('#tab-btn-structure');
+    const disposablePost = db.createPost({
+      threadId: 1,
+      authorName: 'モデ確認用',
+      visitorId: 'e2e_mod',
+      content: '管理画面から非表示にする投稿E2E',
+    });
+    await evaluate("document.querySelector('#tab-btn-structure').focus()");
+    await pressKey('ArrowRight', 'ArrowRight', 39);
+    await waitFor("document.querySelector('#tab-btn-posts').getAttribute('aria-selected') === 'true' && document.querySelector('#mod-posts-list')?.textContent.includes('管理画面から非表示にする投稿E2E')");
+
+    await click(`[data-action="toggle-pin-post"][data-post-id="${disposablePost.id}"]`);
+    await waitFor(`document.querySelector('[data-action="toggle-pin-post"][data-post-id="${disposablePost.id}"]')?.textContent.includes('解除')`);
+    assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === disposablePost.id).is_pinned, 1);
+
+    await click(`[data-action="soft-delete-post"][data-post-id="${disposablePost.id}"]`);
+    await waitFor(`document.querySelector('[data-action="soft-delete-post"][data-post-id="${disposablePost.id}"]')?.disabled === true`);
+    assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === disposablePost.id).is_deleted, 1);
+
+    // 7. ユーザー一覧＆監査ログタブ表示（秘密非表示・操作履歴反映）
+    await click('#tab-btn-users');
+    await waitFor("document.querySelector('#users-table-body')?.textContent.includes('race_reg_user')");
+    assert.equal(await evaluate("document.body.textContent.includes('scrypt$')"), false);
+
+    await click('#tab-btn-audit');
+    await waitFor("document.querySelector('#audit-table-body')?.textContent.includes('thread_purge')");
+    const auditBodyText = await evaluate("document.querySelector('#audit-table-body').textContent");
+    assert.ok(auditBodyText.includes('category_create'));
+    assert.ok(auditBodyText.includes('post_soft_delete'));
   });
 
   if (process.env.FRONTEND_ARTIFACT_DIR) {

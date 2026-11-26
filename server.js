@@ -65,7 +65,6 @@ function startServer() {
   const server = createApp({
     db,
     idSecret,
-    adminToken: process.env.ADMIN_TOKEN || null,
     trustProxy,
     allowedOrigin,
     allowSignup,

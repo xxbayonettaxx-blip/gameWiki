@@ -19,10 +19,12 @@ const crypto = require('node:crypto');
 // 予期せぬサーバー内部障害（500）を明確に区別するために使用する。
 // ---------------------------------------------------------------------
 class ValidationError extends Error {
-  constructor(message, statusCode = 400) {
+  constructor(message, statusCode = 400, code = null, details = null) {
     super(message);
     this.name = 'ValidationError';
     this.statusCode = statusCode;
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -337,6 +339,101 @@ function validateChangePasswordInput(body) {
   };
 }
 
+// ---------------------------------------------------------------------
+// 11. 管理MVP用のカテゴリ・スレッド・ページング入力検証
+// ---------------------------------------------------------------------
+function validateCategoryName(rawName) {
+  if (typeof rawName !== 'string' || AUTHOR_DISALLOWED_RE.test(rawName) || ZERO_WIDTH_RE.test(rawName)) {
+    throw new ValidationError('カテゴリ名に使用できない制御文字・改行・不可視文字が含まれているか、形式が不正です。', 400);
+  }
+  const trimmed = rawName.replace(EDGE_WHITESPACE_RE, '');
+  const len = countCodePoints(trimmed);
+  if (len < 1 || len > 30) {
+    throw new ValidationError('カテゴリ名は1〜30文字で指定してください。', 400);
+  }
+  return trimmed;
+}
+
+function validateThreadTitle(rawTitle) {
+  if (typeof rawTitle !== 'string' || AUTHOR_DISALLOWED_RE.test(rawTitle) || ZERO_WIDTH_RE.test(rawTitle)) {
+    throw new ValidationError('スレッドタイトルに使用できない制御文字・改行・不可視文字が含まれているか、形式が不正です。', 400);
+  }
+  const trimmed = rawTitle.replace(EDGE_WHITESPACE_RE, '');
+  const len = countCodePoints(trimmed);
+  if (len < 1 || len > 100) {
+    throw new ValidationError('スレッドタイトルは1〜100文字で指定してください。', 400);
+  }
+  return trimmed;
+}
+
+function validateThreadPinnedText(rawText) {
+  if (rawText === null || rawText === undefined) {
+    return null;
+  }
+  if (typeof rawText !== 'string') {
+    throw new ValidationError('スレッド案内文（pinned_text）は文字列で指定してください。', 400);
+  }
+  const normalized = rawText.replace(/\r\n?/g, '\n');
+  if (DISALLOWED_CONTROL_RE.test(normalized) || ZERO_WIDTH_RE.test(normalized)) {
+    throw new ValidationError('スレッド案内文に使用できない制御文字または不可視文字が含まれています。', 400);
+  }
+  const visibleChars = normalized.replace(INVISIBLE_STRIP_RE, '');
+  if (visibleChars.length === 0) {
+    return null;
+  }
+  const cleaned = normalized.replace(EDGE_WHITESPACE_RE, '');
+  if (countCodePoints(cleaned) > 500) {
+    throw new ValidationError('スレッド案内文（pinned_text）は500文字以内で指定してください。', 400);
+  }
+  return cleaned;
+}
+
+function validateNonNegativeInt(value, fieldLabel = '表示順') {
+  if (typeof value === 'number') {
+    if (Number.isSafeInteger(value) && value >= 0) {
+      return value;
+    }
+    throw new ValidationError(`${fieldLabel}（display_order）は0以上の整数で指定してください。`, 400);
+  }
+  if (typeof value === 'string' && /^(?:0|[1-9]\d*)$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    if (Number.isSafeInteger(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  throw new ValidationError(`${fieldLabel}（display_order）は0以上の整数で指定してください。`, 400);
+}
+
+function parsePaginationLimit(rawValue, { defaultLimit = 50, maxLimit = 100 } = {}) {
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return defaultLimit;
+  }
+  const parsed = parsePositiveInt(rawValue, '取得件数(limit)');
+  if (parsed > maxLimit) {
+    throw new ValidationError(`取得件数(limit)は1〜${maxLimit}の範囲で指定してください。`, 400);
+  }
+  return parsed;
+}
+
+function parsePaginationOffset(rawValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return 0;
+  }
+  if (typeof rawValue === 'number') {
+    if (Number.isSafeInteger(rawValue) && rawValue >= 0) {
+      return rawValue;
+    }
+    throw new ValidationError('開始位置(offset)は0以上の整数で指定してください。', 400);
+  }
+  if (typeof rawValue === 'string' && /^(?:0|[1-9]\d*)$/.test(rawValue.trim())) {
+    const parsed = Number(rawValue.trim());
+    if (Number.isSafeInteger(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  throw new ValidationError('開始位置(offset)は0以上の整数で指定してください。', 400);
+}
+
 module.exports = {
   ValidationError,
   MIN_USERNAME_LENGTH,
@@ -357,4 +454,10 @@ module.exports = {
   validateAuthRegisterInput,
   validateAuthLoginInput,
   validateChangePasswordInput,
+  validateCategoryName,
+  validateThreadTitle,
+  validateThreadPinnedText,
+  validateNonNegativeInt,
+  parsePaginationLimit,
+  parsePaginationOffset,
 };

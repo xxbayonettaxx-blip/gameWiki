@@ -1,0 +1,469 @@
+/* =====================================================================
+ * public/admin.css
+ * 役割：管理画面 (admin.html) 専用レイアウト・破壊的操作警告・A11yスタイル
+ * 方針：style.css の CUD 5テーマ CSS変数と文字サイズ変数 (--body-size) を継承する。
+ * ===================================================================== */
+
+.admin-page {
+  padding-bottom: 48px;
+}
+
+.admin-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.admin-operator-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--header-accent-soft);
+  color: var(--header-accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.admin-main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px 16px 48px;
+  font-size: var(--body-size, 16px);
+}
+
+.admin-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: var(--shadow);
+  margin-bottom: 16px;
+}
+
+.admin-card h2 {
+  margin: 0 0 12px;
+  font-size: 1.08em;
+  color: var(--ink);
+}
+
+.admin-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.admin-card-head h2 {
+  margin: 0;
+}
+
+.admin-help {
+  margin: 0 0 14px;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.admin-muted-meta {
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.admin-gate {
+  max-width: 560px;
+  margin: 28px auto;
+}
+
+.admin-gate h1 {
+  margin: 4px 0 10px;
+  font-size: 1.35em;
+}
+
+.admin-link-button {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.admin-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.admin-title-row h1 {
+  margin: 4px 0 0;
+  font-size: 1.45em;
+}
+
+.admin-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.admin-stat-box {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.admin-stat-label {
+  font-size: 0.8em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.admin-stat-box strong {
+  font-size: 1.25em;
+  color: var(--ink);
+}
+
+.admin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.admin-tab {
+  min-height: 42px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--control-border);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.88em;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.admin-tab[aria-selected="true"] {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+.admin-tab:focus-visible,
+.admin-main button:focus-visible,
+.admin-main input:focus-visible,
+.admin-main textarea:focus-visible,
+.admin-main select:focus-visible,
+.admin-dialog button:focus-visible,
+.admin-dialog input:focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.admin-grid-two {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.admin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.admin-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.88em;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.admin-field input,
+.admin-field textarea,
+.admin-field select {
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 7px;
+  border: 1px solid var(--control-border);
+  background: var(--surface-alt);
+  color: var(--ink);
+  font-size: 0.95em;
+}
+
+.admin-inline-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.admin-inline-fields > .admin-field {
+  flex: 1 1 160px;
+}
+
+.admin-checkbox-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  font-size: 0.88em;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.admin-checkbox-field input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.structure-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.structure-cat-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  background: var(--surface-alt);
+}
+
+.structure-cat-heading {
+  margin: 0 0 10px;
+  font-size: 0.96em;
+  color: var(--ink);
+}
+
+.structure-cat-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 12px;
+}
+
+.structure-edit-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  flex: 1 1 320px;
+}
+
+.structure-edit-row .admin-field {
+  flex: 1 1 180px;
+}
+
+.structure-edit-row .field-order {
+  flex: 0 1 110px;
+}
+
+.structure-btn-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.structure-thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.structure-thread-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.structure-thread-meta {
+  font-size: 0.82em;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.button-danger {
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: 1px solid var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+  font-size: 0.85em;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.button-danger:hover {
+  filter: brightness(0.96);
+}
+
+.button-danger:disabled,
+.button-secondary:disabled,
+.button-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.admin-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  margin-bottom: 14px;
+}
+
+.admin-thread-picker {
+  flex: 1 1 280px;
+}
+
+.mod-posts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mod-post-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-alt);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mod-post-card.is-deleted {
+  opacity: 0.72;
+}
+
+.mod-post-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+.mod-post-body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.94em;
+}
+
+.admin-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86em;
+}
+
+.admin-table th,
+.admin-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 9px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.admin-table th {
+  color: var(--muted);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.admin-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.admin-dialog {
+  width: min(540px, calc(100vw - 24px));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--drawer-shadow);
+}
+
+.admin-dialog::backdrop {
+  background: rgba(15, 20, 30, 0.58);
+}
+
+.admin-dialog-inner {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.danger-notice {
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--danger-line);
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+  font-size: 0.88em;
+}
+
+.danger-notice p {
+  margin: 0 0 8px;
+}
+
+.purge-summary {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.purge-summary > div {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.purge-summary dt {
+  font-weight: 700;
+}
+
+.purge-summary dd {
+  margin: 0;
+}
+
+.admin-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}

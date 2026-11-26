@@ -343,6 +343,10 @@
       }
       $('#auth-member-name').textContent = state.user.username;
       $('#auth-member-role').textContent = state.user.role === 'admin' ? '管理者' : '一般会員';
+      const adminLink = $('#admin-page-link');
+      if (adminLink) {
+        adminLink.hidden = !(state.user.role === 'admin' && !mustChange);
+      }
       $('#must-change-banner').hidden = !mustChange;
 
       const pwSection = $('#password-section');
@@ -390,6 +394,8 @@
         loginNotice.textContent = '';
       }
     } else {
+      const adminLink = $('#admin-page-link');
+      if (adminLink) adminLink.hidden = true;
       if (guestPanel) guestPanel.hidden = false;
       if (memberPanel) memberPanel.hidden = true;
       if (titleEl) titleEl.textContent = 'ログイン・新規登録';
@@ -1075,6 +1081,20 @@
     if (latestAt) tSummary.latest_post_at = latestAt;
   }
 
+  function syncThreadGuide() {
+    const section = $('#thread-guide');
+    const textEl = $('#thread-guide-text');
+    if (!section || !textEl) return;
+    const guide = state.activeThreadData?.pinned_text;
+    if (typeof guide === 'string' && guide.trim() !== '') {
+      textEl.textContent = guide;
+      section.hidden = false;
+    } else {
+      textEl.textContent = '';
+      section.hidden = true;
+    }
+  }
+
   function syncHeaders() {
     if (!state.activeCategory) return;
     $('#breadcrumb-category').textContent = state.activeCategory.name;
@@ -1091,6 +1111,7 @@
       $('#thread-title').textContent = 'スレッドがありません';
       $('#thread-label').textContent = 'THREAD --';
     }
+    syncThreadGuide();
     syncComposerHeader();
   }
 
@@ -1149,6 +1170,7 @@
         $('#category-title').textContent = 'カテゴリがありません';
         $('#thread-title').textContent = 'スレッドがありません';
         $('#thread-label').textContent = 'THREAD --';
+        syncThreadGuide();
         renderNavigation();
         renderAllPosts();
         syncSubmitAvailability();
@@ -1194,6 +1216,7 @@
       $('#thread-category-tag').textContent = '-';
       $('#thread-label').textContent = 'THREAD --';
       $('#thread-title').textContent = '再読み込みをお試しください';
+      syncThreadGuide();
       showErrorBanner(err.message || 'サーバーとの通信に失敗しました。');
       syncSubmitAvailability();
     } finally {

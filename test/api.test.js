@@ -16,10 +16,15 @@ const path = require('node:path');
 const { createBoardDb } = require('../src/db');
 const { runSeed } = require('../src/seed');
 const { createApp } = require('../src/app');
-const { createScryptQueue, HTTPS_SESSION_COOKIE_NAME, DEV_SESSION_COOKIE_NAME } = require('../src/auth');
+const {
+  createScryptQueue,
+  generateSessionToken,
+  hashSessionToken,
+  HTTPS_SESSION_COOKIE_NAME,
+  DEV_SESSION_COOKIE_NAME,
+} = require('../src/auth');
 
 const TEST_ID_SECRET = 'test_secret_key_for_api_suite_32chars!';
-const TEST_ADMIN_TOKEN = 'test_admin_token_for_api_suite_32chars!';
 
 function makeFastScryptFn() {
   const crypto = require('node:crypto');
@@ -42,15 +47,15 @@ function extractSetCookiePair(res) {
 async function startTestServer(customOptions = {}) {
   const db = createBoardDb({ dbPath: ':memory:', ...customOptions.dbOptions });
   runSeed(db);
+  const devInsecureCookie = customOptions.devInsecureCookie ?? false;
 
   const server = createApp({
     db,
     idSecret: TEST_ID_SECRET,
-    adminToken: TEST_ADMIN_TOKEN,
     trustProxy: customOptions.trustProxy ?? false,
     allowedOrigin: customOptions.allowedOrigin ?? null,
     allowSignup: customOptions.allowSignup ?? true,
-    devInsecureCookie: customOptions.devInsecureCookie ?? false,
+    devInsecureCookie,
     maxBodyBytes: customOptions.maxBodyBytes ?? 4096,
     authMaxBodyBytes: customOptions.authMaxBodyBytes ?? 4096,
     rateLimitMaxPosts: customOptions.rateLimitMaxPosts ?? 30,
@@ -69,13 +74,31 @@ async function startTestServer(customOptions = {}) {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}`;
+  const cookieName = devInsecureCookie ? DEV_SESSION_COOKIE_NAME : HTTPS_SESSION_COOKIE_NAME;
 
   async function stop() {
     await new Promise((resolve) => server.close(resolve));
     db.close();
   }
 
-  return { db, server, baseUrl, stop };
+  return { db, server, baseUrl, cookieName, stop };
+}
+
+function createDirectUserSessionCookie(ctx, { username, role = 'user', mustChangePassword = false }) {
+  const rawToken = generateSessionToken();
+  const tokenHash = hashSessionToken(rawToken);
+  const nowIso = new Date().toISOString();
+  const expiresAt = '2099-01-01T00:00:00.000Z';
+  const user = ctx.db.createUserWithSession({
+    username,
+    passwordHash: `scrypt$v1$16384$8$5$64$${'11'.repeat(16)}$${'22'.repeat(64)}`,
+    role,
+    tokenHash,
+    expiresAt,
+    nowIso,
+    mustChangePassword,
+  });
+  return { user, cookie: `${ctx.cookieName}=${rawToken}`, rawToken, tokenHash };
 }
 
 test('HTTP統合: スレッド一覧・切替・投稿・返信・XSS文字列の無害保持・論理削除マスク (T-01, T-07, T-11, T-12)', async (t) => {
@@ -134,20 +157,36 @@ test('HTTP統合: スレッド一覧・切替・投稿・返信・XSS文字列�
   assert.equal(createdChild.author_name, '名無しさん');
   assert.equal(createdChild.parent_id, createdParent.id);
 
-  // 4. 未認証での管理削除API直叩きは 401 で拒絶されること (T-07)
+  // 4. 未認証・旧Bearer認証での管理削除API直叩きは 401 で拒絶されること (T-07 / v1.1 Bearer廃止)
   const unauthDel = await fetch(`${ctx.baseUrl}/api/admin/posts/${createdParent.id}/delete`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Origin: ctx.baseUrl },
     body: '{}',
   });
   assert.equal(unauthDel.status, 401);
 
-  // 5. 正規トークンでの論理削除後はAPIのJSONから元本文が消え、子返信は残ること (T-11)
+  const legacyBearerDel = await fetch(`${ctx.baseUrl}/api/admin/posts/${createdParent.id}/delete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Origin: ctx.baseUrl,
+      Authorization: 'Bearer legacy_admin_token_should_not_work_32c',
+    },
+    body: '{}',
+  });
+  assert.equal(legacyBearerDel.status, 401);
+
+  // 5. 管理者セッションでの論理削除後はAPIのJSONから元本文が消え、子返信は残ること (T-11)
+  const { cookie: adminCookie } = createDirectUserSessionCookie(ctx, {
+    username: 'test_admin_del',
+    role: 'admin',
+  });
   const authDel = await fetch(`${ctx.baseUrl}/api/admin/posts/${createdParent.id}/delete`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      Origin: ctx.baseUrl,
+      Cookie: adminCookie,
     },
     body: '{}',
   });
@@ -254,6 +293,18 @@ test('静的配信と公開境界: 非公開ファイル・パストラバーサ
   const appJsPath = path.join(__dirname, '..', 'public', 'app.js');
   const appJsSource = fs.readFileSync(appJsPath, 'utf8');
   assert.equal(/\.innerHTML\s*=/.test(appJsSource), false, 'app.js 内で innerHTML 代入を使用しないこと');
+  const adminJsPath = path.join(__dirname, '..', 'public', 'admin.js');
+  const adminJsSource = fs.readFileSync(adminJsPath, 'utf8');
+  assert.equal(/\.innerHTML\s*=/.test(adminJsSource), false, 'admin.js 内で innerHTML 代入を使用しないこと');
+  const adminHtmlRes = await fetch(`${ctx.baseUrl}/admin.html`);
+  assert.equal(adminHtmlRes.status, 200);
+  assert.equal(adminHtmlRes.headers.get('cache-control'), 'no-store');
+  const adminJsRes = await fetch(`${ctx.baseUrl}/admin.js`);
+  assert.equal(adminJsRes.status, 200);
+  assert.equal(adminJsRes.headers.get('cache-control'), 'no-store');
+  const adminCssRes = await fetch(`${ctx.baseUrl}/admin.css`);
+  assert.equal(adminCssRes.status, 200);
+  assert.equal(adminCssRes.headers.get('cache-control'), 'no-store');
   assert.equal(
     appJsSource.includes("querySelectorAll('[data-font]')"),
     false,
@@ -352,31 +403,38 @@ test('管理ピン留めAPIとデザイン実験2案（sample-base / slide-drawe
   const { post } = await createRes.json();
   assert.equal(post.is_pinned, 0);
 
-  // 未認証でのピン留め要求は 401
+  // 未認証でのピン留め要求は 401（旧Bearerでも401）
   const unauthPin = await fetch(`${ctx.baseUrl}/api/admin/posts/${post.id}/pin`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Origin: ctx.baseUrl },
     body: JSON.stringify({ pinned: true }),
   });
   assert.equal(unauthPin.status, 401);
+
+  const { cookie: adminPinCookie } = createDirectUserSessionCookie(ctx, {
+    username: 'test_admin_pin',
+    role: 'admin',
+  });
 
   // 不正な型（文字列 "false" 等）は 400 で拒否
   const badTypePin = await fetch(`${ctx.baseUrl}/api/admin/posts/${post.id}/pin`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      Origin: ctx.baseUrl,
+      Cookie: adminPinCookie,
     },
     body: JSON.stringify({ pinned: 'false' }),
   });
   assert.equal(badTypePin.status, 400);
 
-  // 正規トークンでピン留め ON -> GET /api/threads/2 で is_pinned === 1 になること
+  // 管理者セッションでピン留め ON -> GET /api/threads/2 で is_pinned === 1 になること
   const pinOn = await fetch(`${ctx.baseUrl}/api/admin/posts/${post.id}/pin`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      Origin: ctx.baseUrl,
+      Cookie: adminPinCookie,
     },
     body: JSON.stringify({ pinned: true }),
   });
@@ -385,12 +443,13 @@ test('管理ピン留めAPIとデザイン実験2案（sample-base / slide-drawe
   const afterPinThread = await (await fetch(`${ctx.baseUrl}/api/threads/2`)).json();
   assert.equal(afterPinThread.posts.find((p) => p.id === post.id).is_pinned, 1);
 
-  // 正規トークンでピン留め OFF -> is_pinned === 0 に戻ること
+  // 管理者セッションでピン留め OFF -> is_pinned === 0 に戻ること
   const pinOff = await fetch(`${ctx.baseUrl}/api/admin/posts/${post.id}/pin`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${TEST_ADMIN_TOKEN}`,
+      Origin: ctx.baseUrl,
+      Cookie: adminPinCookie,
     },
     body: JSON.stringify({ pinned: false }),
   });
@@ -508,6 +567,19 @@ test('F3・F5・F6回帰検証: ジャンクション脱出遮断・送信途中
   const invalidIdOut = runMod(['purge-tree', '12abc']);
   assert.equal(invalidIdOut.status, 1);
   assert.ok(invalidIdOut.stderr.includes('投稿ID'));
+
+  // 物理削除対象の投稿を1件作成（スレッド案内文は posts へ自動複製されない仕様のため明示投入）
+  const cliPostDb = createBoardDb({ dbPath: cliDbPath });
+  try {
+    cliPostDb.createPost({
+      threadId: 1,
+      authorName: 'CLI検証投稿者',
+      visitorId: 'cli0001',
+      content: 'purge-tree検証用の親投稿',
+    });
+  } finally {
+    cliPostDb.close();
+  }
 
   // 物理削除プレビュー (Dry-Run): --force なしではDB変更されずプレビュー情報が出力されること
   const dryRunOut = runMod(['purge-tree', '1']);
@@ -1036,12 +1108,20 @@ test('管理CLI認証管理コマンド: 引数パスワード拒否・非TTY拒
   assert.equal(roleOut.status, 0);
   assert.match(roleOut.stdout, /role=admin/);
 
+  // CLI でも最後の管理者降格は拒否されること
+  const lastAdminDemote = runMod(['set-role', 'cli_alice', 'user']);
+  assert.equal(lastAdminDemote.status, 1);
+  assert.match(lastAdminDemote.stderr, /最後の管理者/);
+
   const verifyDb = createBoardDb({ dbPath: cliDbPath });
   try {
     const u = verifyDb.getUserForAuthByUsername('cli_alice');
     assert.equal(u.role, 'admin');
     // set-role 時点で全セッションが失効されていること
     assert.equal(verifyDb.getSessionAuthByTokenHash('e'.repeat(64), '2026-11-19T01:00:00.000Z'), null);
+    // CLI 操作が admin_audit_logs へ actor_type='cli' で記録されていること
+    const audits = verifyDb.listAdminAuditLogs({ limit: 10 });
+    assert.ok(audits.logs.some((a) => a.actorType === 'cli' && a.action === 'user_role_change'));
   } finally {
     verifyDb.close();
   }
@@ -1691,4 +1771,393 @@ test('昇格前レビュー回帰(R1): POST /api/posts は expected_user_id で�
   });
   assert.equal(legacyClientRes.status, 201);
   assert.equal(ctx.db.getThreadDetail(1).posts.length, beforeCount + 3);
+});
+
+test('v1.1管理MVP(API): 全/api/admin/*認可マトリクス・旧Bearer拒否・Origin強制・no-store・ページング・秘密非露出', async (t) => {
+  const ctx = await startTestServer({ devInsecureCookie: true });
+  t.after(() => ctx.stop());
+  const origin = ctx.baseUrl;
+
+  const { cookie: memberCookie } = createDirectUserSessionCookie(ctx, {
+    username: 'matrix_user',
+    role: 'user',
+  });
+  const { cookie: tempAdminCookie } = createDirectUserSessionCookie(ctx, {
+    username: 'matrix_temp_admin',
+    role: 'admin',
+    mustChangePassword: true,
+  });
+  const { cookie: adminCookie } = createDirectUserSessionCookie(ctx, {
+    username: 'matrix_admin',
+    role: 'admin',
+    mustChangePassword: false,
+  });
+
+  // 1. GET 系と更新系を含む主要管理ルートでの 4段階アクセス制御
+  const targets = [
+    { path: '/api/admin/overview', method: 'GET' },
+    { path: '/api/admin/users', method: 'GET' },
+    { path: '/api/admin/audit-logs', method: 'GET' },
+    { path: '/api/admin/threads/1/posts', method: 'GET' },
+    { path: '/api/admin/threads/1/delete-preview', method: 'GET' },
+    { path: '/api/admin/categories', method: 'POST', body: { name: '無許可テスト' } },
+    { path: '/api/admin/categories/1', method: 'PATCH', body: { name: '無許可更新' } },
+    { path: '/api/admin/categories/1', method: 'DELETE', body: {} },
+    { path: '/api/admin/threads', method: 'POST', body: { categoryId: 1, title: '無許可スレ' } },
+    { path: '/api/admin/threads/1', method: 'PATCH', body: { title: '無許可スレ変更' } },
+    {
+      path: '/api/admin/threads/1',
+      method: 'DELETE',
+      body: { confirmTitle: '雑談', expectedPostCount: 0 },
+    },
+    { path: '/api/admin/posts/1/delete', method: 'POST', body: {} },
+    { path: '/api/admin/posts/1/pin', method: 'POST', body: { pinned: true } },
+  ];
+
+  for (const tgt of targets) {
+    const isMut = tgt.method !== 'GET';
+    const makeHeaders = (extra = {}) => ({
+      ...(isMut ? { 'Content-Type': 'application/json', Origin: origin } : {}),
+      ...extra,
+    });
+
+    // guest (Cookieなし) -> 401
+    const guestRes = await fetch(`${origin}${tgt.path}`, {
+      method: tgt.method,
+      headers: makeHeaders(),
+      ...(isMut ? { body: JSON.stringify(tgt.body) } : {}),
+    });
+    assert.equal(guestRes.status, 401, `guest rejected at ${tgt.method} ${tgt.path}`);
+    assert.equal(guestRes.headers.get('cache-control'), 'no-store');
+
+    // user (一般会員) -> 403
+    const userRes = await fetch(`${origin}${tgt.path}`, {
+      method: tgt.method,
+      headers: makeHeaders({ Cookie: memberCookie }),
+      ...(isMut ? { body: JSON.stringify(tgt.body) } : {}),
+    });
+    assert.equal(userRes.status, 403, `user rejected at ${tgt.method} ${tgt.path}`);
+
+    // admin + mustChangePassword=1 -> 403 PASSWORD_CHANGE_REQUIRED
+    const tempRes = await fetch(`${origin}${tgt.path}`, {
+      method: tgt.method,
+      headers: makeHeaders({ Cookie: tempAdminCookie }),
+      ...(isMut ? { body: JSON.stringify(tgt.body) } : {}),
+    });
+    assert.equal(tempRes.status, 403, `temp admin rejected at ${tgt.method} ${tgt.path}`);
+    const tempJson = await tempRes.json();
+    assert.equal(tempJson.code, 'PASSWORD_CHANGE_REQUIRED');
+
+    if (isMut) {
+      // Origin 欠落 -> 403 / 別Origin -> 403 / 旧Bearer -> 401
+      const noOriginRes = await fetch(`${origin}${tgt.path}`, {
+        method: tgt.method,
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify(tgt.body),
+      });
+      assert.equal(noOriginRes.status, 403, `missing Origin rejected at ${tgt.method} ${tgt.path}`);
+
+      const wrongOriginRes = await fetch(`${origin}${tgt.path}`, {
+        method: tgt.method,
+        headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example', Cookie: adminCookie },
+        body: JSON.stringify(tgt.body),
+      });
+      assert.equal(wrongOriginRes.status, 403, `cross Origin rejected at ${tgt.method} ${tgt.path}`);
+
+      const bearerRes = await fetch(`${origin}${tgt.path}`, {
+        method: tgt.method,
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: origin,
+          Authorization: 'Bearer legacy_admin_token_should_fail_1234',
+        },
+        body: JSON.stringify(tgt.body),
+      });
+      assert.equal(bearerRes.status, 401, `legacy Bearer rejected at ${tgt.method} ${tgt.path}`);
+    }
+  }
+
+  // 2. 正規管理者 GET /api/admin/overview, users, audit-logs の no-store / ページング / 秘密非露出
+  const ovRes = await fetch(`${origin}/board/api/admin/overview`, {
+    headers: { Cookie: adminCookie },
+  });
+  assert.equal(ovRes.status, 200);
+  assert.equal(ovRes.headers.get('cache-control'), 'no-store');
+  const ovData = await ovRes.json();
+  assert.equal(ovData.user.username, 'matrix_admin');
+  assert.ok(ovData.summary.categoriesCount >= 3);
+  assert.equal(ovData.users, undefined);
+
+  const usersRes = await fetch(`${origin}/board/api/admin/users?limit=2&offset=1`, {
+    headers: { Cookie: adminCookie },
+  });
+  assert.equal(usersRes.status, 200);
+  const usersText = await usersRes.text();
+  assert.equal(usersText.includes('scrypt$'), false, 'password_hash が DTO に出ないこと');
+  const usersData = JSON.parse(usersText);
+  assert.equal(usersData.limit, 2);
+  assert.equal(usersData.offset, 1);
+  assert.equal(usersData.users.length, 2);
+  for (const u of usersData.users) {
+    assert.equal('password_hash' in u, false);
+    assert.equal('passwordHash' in u, false);
+    assert.equal('token_hash' in u, false);
+    assert.equal('tokenHash' in u, false);
+  }
+
+  // limit > 100 は 400 で拒否
+  const badLimitRes = await fetch(`${origin}/api/admin/users?limit=101`, {
+    headers: { Cookie: adminCookie },
+  });
+  assert.equal(badLimitRes.status, 400);
+  const badAuditLimitRes = await fetch(`${origin}/api/admin/audit-logs?limit=101`, {
+    headers: { Cookie: adminCookie },
+  });
+  assert.equal(badAuditLimitRes.status, 400);
+});
+
+test('v1.1管理MVP(CRUD・競合): カテゴリ/スレッドCRUD・削除直前件数変化409・受信中降格/失効で確定阻止・監査一致', async (t) => {
+  const http = require('node:http');
+  const ctx = await startTestServer({ devInsecureCookie: true });
+  t.after(() => ctx.stop());
+  const origin = ctx.baseUrl;
+
+  const { user: admin1, cookie: adminCookie1 } = createDirectUserSessionCookie(ctx, {
+    username: 'crud_admin_1',
+    role: 'admin',
+  });
+  const { cookie: adminCookie2, tokenHash: admin2TokenHash } = createDirectUserSessionCookie(ctx, {
+    username: 'crud_admin_2',
+    role: 'admin',
+  });
+
+  // 1. カテゴリ作成 → 同名409 → 更新 → 配下あり削除409 → スレッド作成/編集 → 直前投稿増加で409 → 再確認で物理削除 → 空カテゴリ削除
+  const createCatRes = await fetch(`${origin}/board/api/admin/categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: JSON.stringify({ name: '検証カテゴリ', displayOrder: 9 }),
+  });
+  assert.equal(createCatRes.status, 201);
+  const { category: createdCat } = await createCatRes.json();
+
+  const dupCatRes = await fetch(`${origin}/board/api/admin/categories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: JSON.stringify({ name: '検証カテゴリ' }),
+  });
+  assert.equal(dupCatRes.status, 409);
+
+  const patchCatRes = await fetch(`${origin}/board/api/admin/categories/${createdCat.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: JSON.stringify({ name: '改訂カテゴリ', displayOrder: 2 }),
+  });
+  assert.equal(patchCatRes.status, 200);
+  assert.equal((await patchCatRes.json()).category.name, '改訂カテゴリ');
+
+  const createThRes = await fetch(`${origin}/board/api/admin/threads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: JSON.stringify({
+      categoryId: createdCat.id,
+      title: '管理スレ1',
+      pinnedText: '初期ピン文',
+      isPinned: true,
+    }),
+  });
+  assert.equal(createThRes.status, 201);
+  const { thread: createdTh } = await createThRes.json();
+  assert.equal(createdTh.pinned_text, '初期ピン文');
+  assert.equal(createdTh.is_pinned, 1);
+
+  const patchThRes = await fetch(`${origin}/board/api/admin/threads/${createdTh.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: JSON.stringify({ title: '管理スレ改訂', pinnedText: '改訂ピン文', isPinned: false, displayOrder: 3 }),
+  });
+  assert.equal(patchThRes.status, 200);
+  const patchedTh = (await patchThRes.json()).thread;
+  assert.equal(patchedTh.title, '管理スレ改訂');
+  assert.equal(patchedTh.pinned_text, '改訂ピン文');
+  assert.equal(patchedTh.is_pinned, 0);
+
+  // 配下にスレッドが残るカテゴリ削除 -> 409 CATEGORY_NOT_EMPTY
+  const nonEmptyCatDel = await fetch(`${origin}/board/api/admin/categories/${createdCat.id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: '{}',
+  });
+  assert.equal(nonEmptyCatDel.status, 409);
+  assert.equal((await nonEmptyCatDel.json()).code, 'CATEGORY_NOT_EMPTY');
+
+  // P2-2単一ソース検証：スレッド案内文は posts に複製されず、スレッド詳細の pinned_text のみで保持されること
+  const thDetailBeforeRace = await (await fetch(`${origin}/board/api/threads/${createdTh.id}`)).json();
+  assert.equal(thDetailBeforeRace.thread.pinned_text, '改訂ピン文');
+  assert.equal(thDetailBeforeRace.posts.length, 0);
+
+  // 削除プレビュー取得後に新投稿が増えた場合の 409 THREAD_POST_COUNT_CHANGED と再確認成功
+  const previewData = await (
+    await fetch(`${origin}/board/api/admin/threads/${createdTh.id}/delete-preview`, {
+      headers: { Cookie: adminCookie1 },
+    })
+  ).json();
+  assert.equal(previewData.postsCount, 0);
+
+  ctx.db.createPost({
+    threadId: createdTh.id,
+    authorName: '割り込み',
+    visitorId: 'race01',
+    content: 'プレビュー後の新規投稿',
+  });
+
+  const stalePurgeRes = await fetch(`${origin}/board/api/admin/threads/${createdTh.id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: JSON.stringify({ confirmTitle: '管理スレ改訂', expectedPostCount: 0 }),
+  });
+  assert.equal(stalePurgeRes.status, 409);
+  const stalePurgeJson = await stalePurgeRes.json();
+  assert.equal(stalePurgeJson.code, 'THREAD_POST_COUNT_CHANGED');
+  assert.equal(stalePurgeJson.details.actualPostsCount, 1);
+
+  const okPurgeRes = await fetch(`${origin}/board/api/admin/threads/${createdTh.id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: JSON.stringify({ confirmTitle: '管理スレ改訂', expectedPostCount: 1 }),
+  });
+  assert.equal(okPurgeRes.status, 200);
+  assert.equal((await okPurgeRes.json()).deletedPostsCount, 1);
+
+  const emptyCatDel = await fetch(`${origin}/board/api/admin/categories/${createdCat.id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: '{}',
+  });
+  assert.equal(emptyCatDel.status, 200);
+
+  // P1-2: 最後の1カテゴリを残して他をすべて空・削除したとき、最後の1件は 409 LAST_CATEGORY_PROTECTED で拒否されること
+  const catsForLastGuard = ctx.db.listCategoriesWithThreads();
+  for (let i = 1; i < catsForLastGuard.length; i += 1) {
+    const c = catsForLastGuard[i];
+    for (const th of c.threads) {
+      ctx.db.purgeThread(th.id);
+    }
+    const delOther = await fetch(`${origin}/board/api/admin/categories/${c.id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+      body: '{}',
+    });
+    assert.equal(delOther.status, 200);
+  }
+  const finalRemainingCat = ctx.db.listCategoriesWithThreads()[0];
+  for (const th of finalRemainingCat.threads) {
+    ctx.db.purgeThread(th.id);
+  }
+  const delLastCatRes = await fetch(`${origin}/board/api/admin/categories/${finalRemainingCat.id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie1 },
+    body: '{}',
+  });
+  assert.equal(delLastCatRes.status, 409);
+  assert.equal((await delLastCatRes.json()).code, 'LAST_CATEGORY_PROTECTED');
+
+  // 2. ボディ受信中に降格された管理者2のリクエストが確定直前検査で 403 FORBIDDEN になること
+  const sendAdminChunkedDuringDemotion = () =>
+    new Promise((resolve, reject) => {
+      const reqPromise = new Promise((resReq) => ctx.server.once('request', resReq));
+      const req = http.request(
+        `${origin}/api/admin/categories`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: origin,
+            Cookie: adminCookie2,
+            Connection: 'close',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+        }
+      );
+      req.on('error', reject);
+      req.write('{"name":');
+      reqPromise
+        .then(() => new Promise((r) => setTimeout(r, 10)))
+        .then(() => {
+          // 受信中に管理者2を一般会員へ降格（セッションは別手段で残存しても最新roleで拒否、さらに失効も別テストで確認）
+          ctx.db.execRawForTesting("UPDATE users SET role = 'user' WHERE username = 'crud_admin_2'");
+          req.end('"受信中降格カテゴリ"}');
+        })
+        .catch(reject);
+    });
+  const demotedDuringBody = await sendAdminChunkedDuringDemotion();
+  assert.equal(demotedDuringBody.status, 403);
+  assert.equal(demotedDuringBody.body.code, 'FORBIDDEN');
+  assert.equal(
+    ctx.db.listCategoriesWithThreads().some((c) => c.name === '受信中降格カテゴリ'),
+    false
+  );
+
+  // 別操作でセッション失効させた場合（adminCookie1 をボディ受信中に revoke） -> 401 SESSION_EXPIRED
+  const sendChunkedDuringRevoke = () =>
+    new Promise((resolve, reject) => {
+      const reqPromise = new Promise((resReq) => ctx.server.once('request', resReq));
+      const req = http.request(
+        `${origin}/api/admin/categories`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: origin,
+            Cookie: adminCookie1,
+            Connection: 'close',
+          },
+        },
+        (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(body) }));
+        }
+      );
+      req.on('error', reject);
+      req.write('{"name":');
+      reqPromise
+        .then(() => new Promise((r) => setTimeout(r, 10)))
+        .then(() => {
+          ctx.db.revokeAllSessionsByUsername('crud_admin_1');
+          req.end('"受信中失効カテゴリ"}');
+        })
+        .catch(reject);
+    });
+  const revokedDuringBody = await sendChunkedDuringRevoke();
+  assert.equal(revokedDuringBody.status, 401);
+  assert.equal(revokedDuringBody.body.code, 'SESSION_EXPIRED');
+  assert.equal(
+    ctx.db.listCategoriesWithThreads().some((c) => c.name === '受信中失効カテゴリ'),
+    false
+  );
+
+  // 3. 新しい管理者セッションで監査ログに Web 操作が一通り記録され、秘密を含まないことを確認
+  const freshAdmin = createDirectUserSessionCookie(ctx, { username: 'audit_reader', role: 'admin' });
+  const auditRes = await fetch(`${origin}/board/api/admin/audit-logs?limit=20`, {
+    headers: { Cookie: freshAdmin.cookie },
+  });
+  assert.equal(auditRes.status, 200);
+  const auditRaw = await auditRes.text();
+  assert.equal(auditRaw.includes(admin2TokenHash), false);
+  const auditData = JSON.parse(auditRaw);
+  const actions = auditData.logs.map((l) => l.action);
+  assert.ok(actions.includes('category_create'));
+  assert.ok(actions.includes('category_update'));
+  assert.ok(actions.includes('thread_create'));
+  assert.ok(actions.includes('thread_update'));
+  assert.ok(actions.includes('thread_purge'));
+  assert.ok(actions.includes('category_delete'));
+  const adminWebLog = auditData.logs.find((l) => l.actorUsername === admin1.username);
+  assert.equal(adminWebLog.actorType, 'admin_web');
 });

@@ -192,7 +192,10 @@
             <strong id="auth-member-name">-</strong>
             <span id="auth-member-role" class="role-badge">一般会員</span>
           </div>
-          <button type="button" id="logout-button" class="button-secondary">ログアウト</button>
+          <div class="member-status-actions">
+            <a id="admin-page-link" class="button-secondary admin-entry-link" href="./admin.html" hidden>管理画面を開く</a>
+            <button type="button" id="logout-button" class="button-secondary">ログアウト</button>
+          </div>
         </div>
         <p id="logout-error" class="form-error" role="alert"></p>
 
@@ -345,8 +348,8 @@
       </section>
 
       <div class="sidebar-bottom">
-        <span class="preview-dot" aria-hidden="true"></span>BOARD EDITION v1.0.1
-        <small>ツリー返信・日替わりID対応</small>
+        <span class="preview-dot" aria-hidden="true"></span>BOARD EDITION v1.1.0
+        <small>ツリー返信・管理MVP・会員認証対応</small>
       </div>
     </aside>
 
@@ -390,6 +393,15 @@
         <div id="error-banner" class="error-banner" role="alert" hidden></div>
         <p id="initial-loading-status" class="initial-loading-status" role="status" aria-live="polite" hidden>掲示板を読み込み中...</p>
 
+        <!-- ②b スレッド案内文（threads.pinned_text が設定されている時のみ表示） -->
+        <section id="thread-guide" class="thread-guide" aria-label="スレッド案内" hidden>
+          <div class="thread-guide-header">
+            <span class="thread-guide-badge">GUIDE</span>
+            <h3>スレッド案内</h3>
+          </div>
+          <p id="thread-guide-text" class="thread-guide-text"></p>
+        </section>
+
         <!-- ③ ピン留めされた通常投稿・返信ツリー（該当投稿がある時のみ表示） -->
         <section id="pinned-section" class="pinned-section" aria-labelledby="pinned-heading" hidden>
           <div class="pinned-section-header">
@@ -423,10 +435,10 @@
 
       <footer class="page-footer">
         <span>COMMUNITY <b>BOARD</b></span>
-        <p>誰もが読みやすく参加しやすい汎用掲示板（v1.0.1）</p>
+        <p>誰もが読みやすく参加しやすい汎用掲示板（v1.1.0）</p>
         <button type="button" class="footer-guide" id="footer-guide">使い方</button>
         <a class="footer-guide" href="privacy.html">プライバシーポリシー</a>
-        <span class="footer-version">EDITION v1.0.1</span>
+        <span class="footer-version">EDITION v1.1.0</span>
         <small class="footer-copy">© 2026 KoohiQK</small>
       </footer>
     </main>

@@ -386,9 +386,11 @@ test('投稿ピン留めと旧DBからの非破壊自動マイグレーション
     categoryId: addedCat.id,
     title: 'おすすめ編成スレッド',
     pinnedText: '編成相談用の案内文です。',
+    isPinned: true,
   });
   assert.equal(addedThread.category_id, addedCat.id);
   assert.equal(addedThread.title, 'おすすめ編成スレッド');
+  assert.equal(addedThread.pinned_text, '編成相談用の案内文です。');
   assert.equal(addedThread.is_pinned, 1);
 
   const renamedThread = db.updateThread({
@@ -398,11 +400,30 @@ test('投稿ピン留めと旧DBからの非破壊自動マイグレーション
   assert.equal(renamedThread.found, true);
   assert.equal(renamedThread.thread.title, '総合編成相談スレッド');
 
-  // 案内文付きで追加したスレッドには初期ピン留め投稿（is_pinned = 1）が自動作成されUIに表示されること
-  const addedThreadDetail = db.getThreadDetail(addedThread.id);
+  // P2-2単一ソース検証：案内文は threads.pinned_text のみに保持され、posts へ重複投稿を自動生成しないこと
+  let addedThreadDetail = db.getThreadDetail(addedThread.id);
+  assert.equal(addedThreadDetail.thread.pinned_text, '編成相談用の案内文です。');
+  assert.equal(addedThreadDetail.posts.length, 0);
+
+  // 通常投稿のピン留めを作成した上でスレッド案内文を更新・消去しても、通常ピン投稿に影響しないこと
+  const normalPinPost = db.createPost({
+    threadId: addedThread.id,
+    authorName: '常連投稿者',
+    visitorId: 'guide_test1',
+    content: '通常のピン留め対象投稿',
+  });
+  db.setPostPinned(normalPinPost.id, true);
+  db.updateThread({ threadId: addedThread.id, pinnedText: '改訂後の案内文です。' });
+  addedThreadDetail = db.getThreadDetail(addedThread.id);
+  assert.equal(addedThreadDetail.thread.pinned_text, '改訂後の案内文です。');
   assert.equal(addedThreadDetail.posts.length, 1);
   assert.equal(addedThreadDetail.posts[0].is_pinned, 1);
-  assert.equal(addedThreadDetail.posts[0].content, '編成相談用の案内文です。');
+  assert.equal(addedThreadDetail.posts[0].content, '通常のピン留め対象投稿');
+
+  db.updateThread({ threadId: addedThread.id, pinnedText: null });
+  addedThreadDetail = db.getThreadDetail(addedThread.id);
+  assert.equal(addedThreadDetail.thread.pinned_text, null);
+  assert.equal(addedThreadDetail.posts[0].is_pinned, 1);
 
   // スレッド・カテゴリ改名後に seed を再実行しても、旧名スレッドや重複データが一切作られないこと
   const reSeedAfterRename = runSeed(db);
@@ -783,7 +804,7 @@ test('認証DB移行・トランザクション・世代検証(R1)・セッシ�
 
   db = createBoardDb({ dbPath: v05DbPath });
 
-  assert.equal(db.getStatus().schemaVersion, 2);
+  assert.equal(db.getStatus().schemaVersion, 3);
   const migratedPosts = db.getThreadDetail(1).posts;
   assert.equal(migratedPosts.length, 1);
   assert.equal(migratedPosts[0].content, '既存投稿を維持');
@@ -930,4 +951,474 @@ test('認証DB移行・トランザクション・世代検証(R1)・セッシ�
   assert.ok(db.getSessionAuthByTokenHash('d'.repeat(64), nowIso) !== null);
   assert.equal(db.clearAllSessions() >= 1, true);
   assert.equal(db.getSessionAuthByTokenHash('d'.repeat(64), nowIso), null);
+});
+
+test('v1.1管理MVP(DB): v2→v3移行・監査失敗ロールバック・F1復元再適用・最後の管理者保護・updateThread/purgeThread拡張', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'basic-board-v11-db-'));
+  let migrated = null;
+  let db = null;
+  let restoredDb = null;
+
+  try {
+    // 1. 実v2スキーマ相当の隔離DBを作成し v2 -> v3 移行の非破壊性と再起動冪等性を検証
+    const v2Path = path.join(tmpDir, 'v2_to_v3.db');
+    const v2Raw = new DatabaseSync(v2Path);
+    v2Raw.exec(`
+      PRAGMA foreign_keys = ON;
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
+        auth_version INTEGER NOT NULL DEFAULT 0,
+        must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1)),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE threads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+        title TEXT NOT NULL,
+        pinned_text TEXT,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE RESTRICT,
+        parent_id INTEGER,
+        author_name TEXT NOT NULL DEFAULT '名無しさん',
+        visitor_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (id, thread_id),
+        FOREIGN KEY (parent_id, thread_id) REFERENCES posts(id, thread_id) ON DELETE RESTRICT
+      );
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      PRAGMA user_version = 2;
+      INSERT INTO users (username, password_hash, role) VALUES ('root_admin', 'scrypt$v1$16384$8$1$abc$def', 'admin');
+      INSERT INTO users (username, password_hash, role) VALUES ('plain_user', 'scrypt$v1$16384$8$1$abc$def', 'user');
+      INSERT INTO categories (name, display_order) VALUES ('v2既存カテゴリ', 1);
+      INSERT INTO threads (category_id, title, pinned_text, is_pinned, display_order, created_by)
+        VALUES (1, 'v2既存スレッド', '初期案内文', 1, 1, 1);
+      INSERT INTO posts (thread_id, parent_id, author_name, visitor_id, content, created_by)
+        VALUES (1, NULL, 'root_admin', 'v2id01', 'v2親投稿', 1);
+      INSERT INTO posts (thread_id, parent_id, author_name, visitor_id, content, created_by)
+        VALUES (1, 1, 'plain_user', 'v2id02', 'v2返信投稿', 2);
+    `);
+    v2Raw.close();
+
+    migrated = createBoardDb({ dbPath: v2Path });
+    assert.equal(migrated.getStatus().schemaVersion, 3);
+    assert.equal(migrated.listCategoriesWithThreads()[0].threads[0].title, 'v2既存スレッド');
+    assert.equal(migrated.getThreadDetail(1).posts.length, 2);
+    migrated.close();
+    migrated = null;
+
+    // 再起動（再オープン）でもデータ不変・冪等であること
+    db = createBoardDb({ dbPath: v2Path });
+    assert.equal(db.getStatus().schemaVersion, 3);
+    assert.equal(db.getThreadDetail(1).posts.length, 2);
+
+    // 2. updateThread による pinned_text / is_pinned 更新・クリア・制御文字拒否
+    const updatedTh = db.updateThread({
+      threadId: 1,
+      title: 'v3改訂スレッド',
+      pinnedText: '更新後の案内文\n2行目',
+      isPinned: false,
+      displayOrder: 5,
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(updatedTh.thread.title, 'v3改訂スレッド');
+    assert.equal(updatedTh.thread.pinned_text, '更新後の案内文\n2行目');
+    assert.equal(updatedTh.thread.is_pinned, 0);
+    assert.equal(updatedTh.thread.display_order, 5);
+
+    const clearedPin = db.updateThread({
+      threadId: 1,
+      pinnedText: '   ',
+      isPinned: true,
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(clearedPin.thread.pinned_text, null);
+    assert.equal(clearedPin.thread.is_pinned, 1);
+
+    assert.throws(
+      () => db.updateThread({ threadId: 1, pinnedText: '不正\u0000文字' }),
+      /制御文字/
+    );
+
+    // 3. deleteCategory: 配下あり 409 CATEGORY_NOT_EMPTY / 空なら削除成功
+    assert.throws(
+      () => db.deleteCategory(1),
+      (err) => err.statusCode === 409 && err.code === 'CATEGORY_NOT_EMPTY'
+    );
+    const emptyCat = db.createCategory({
+      name: '空カテゴリ',
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    const delCatRes = db.deleteCategory(emptyCat.id, {
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(delCatRes.found, true);
+    assert.equal(delCatRes.deletedCategory.name, '空カテゴリ');
+
+    // 4. purgeThread の直前確認照合 (CONFIRM_TITLE_MISMATCH / THREAD_POST_COUNT_CHANGED)
+    const tempTh = db.createThread({ categoryId: 1, title: '削除確認対象スレ' });
+    db.createPost({ threadId: tempTh.id, authorName: '名無しさん', visitorId: 'v1', content: '削除前投稿' });
+    assert.throws(
+      () => db.purgeThread(tempTh.id, { requireConfirmation: true, confirmTitle: '別タイトル', expectedPostCount: 1 }),
+      (err) => err.statusCode === 400 && err.code === 'CONFIRM_TITLE_MISMATCH'
+    );
+    assert.throws(
+      () => db.purgeThread(tempTh.id, { requireConfirmation: true, confirmTitle: '削除確認対象スレ', expectedPostCount: 0 }),
+      (err) => err.statusCode === 409 && err.code === 'THREAD_POST_COUNT_CHANGED' && err.details.actualPostsCount === 1
+    );
+    const purgeOk = db.purgeThread(tempTh.id, {
+      requireConfirmation: true,
+      confirmTitle: '削除確認対象スレ',
+      expectedPostCount: 1,
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(purgeOk.found, true);
+    assert.equal(purgeOk.deletedPostsCount, 1);
+
+    // 5. 最後の管理者保護 (1->0 拒否 / 2->1 許可) と秘密キー除去付き監査ログ
+    assert.throws(
+      () => db.setUserRoleByUsername({
+        username: 'root_admin',
+        role: 'user',
+        audit: { actorType: 'cli', actorUsername: 'cli' },
+      }),
+      (err) => err.statusCode === 409 && err.code === 'LAST_ADMIN_PROTECTED'
+    );
+    db.setUserRoleByUsername({
+      username: 'plain_user',
+      role: 'admin',
+      audit: { actorType: 'cli', actorUsername: 'cli' },
+    });
+    const demoteFirst = db.setUserRoleByUsername({
+      username: 'root_admin',
+      role: 'user',
+      audit: { actorType: 'cli', actorUsername: 'cli' },
+    });
+    assert.equal(demoteFirst.user.role, 'user');
+    assert.equal(db.getAdminOverview().summary.adminsCount, 1);
+
+    db.resetPasswordByUsername({
+      username: 'root_admin',
+      newPasswordHash: 'hash-hidden-secret',
+      reason: '本人確認メモOK',
+      audit: { actorType: 'cli', actorUsername: 'cli' },
+    });
+    const recentAudits = db.listAdminAuditLogs({ limit: 10 });
+    const resetLog = recentAudits.logs.find((l) => l.action === 'user_reset_password');
+    assert.ok(resetLog);
+    assert.equal(JSON.stringify(resetLog).includes('hash-hidden-secret'), false);
+    assert.equal(resetLog.detail.reason, '本人確認メモOK');
+
+    // 6. 監査書込失敗時に親の状態変更も同一TXで確実にROLLBACKされること
+    db.execRawForTesting(`
+      CREATE TRIGGER trg_fail_audit_test
+      BEFORE INSERT ON admin_audit_logs
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated audit insert failure');
+      END;
+    `);
+    assert.throws(
+      () =>
+        db.createCategory({
+          name: '監査失敗ロールバックカテゴリ',
+          audit: { actorType: 'admin_web', actorUserId: 2, actorUsername: 'plain_user' },
+        }),
+      /simulated audit insert failure/
+    );
+    assert.equal(
+      db.listCategoriesWithThreads().some((c) => c.name === '監査失敗ロールバックカテゴリ'),
+      false
+    );
+    assert.throws(
+      () =>
+        db.softDeletePost(2, {
+          audit: { actorType: 'admin_web', actorUserId: 2, actorUsername: 'plain_user' },
+        }),
+      /simulated audit insert failure/
+    );
+    assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === 2).is_deleted, 0);
+    db.execRawForTesting('DROP TRIGGER trg_fail_audit_test;');
+
+    // 7. F1: 復元時（バックアップ作成後に実施された削除・セッション失効の再適用）手順検証
+    const preActionBackupPath = path.join(tmpDir, 'pre_action_backup.db');
+    db.backupTo(preActionBackupPath, { requireNonEmptyCategories: true });
+    db.softDeletePost(2, { audit: { actorType: 'cli', actorUsername: 'cli' } });
+    assert.equal(db.getThreadDetail(1).posts.find((p) => p.id === 2).is_deleted, 1);
+
+    // バックアップを別先へ復元して確認 → 復元先では未削除のため、削除＆全セッション失効を再適用する
+    const restoredPath = path.join(tmpDir, 'restored_f1.db');
+    fs.copyFileSync(preActionBackupPath, restoredPath);
+    restoredDb = createBoardDb({ dbPath: restoredPath });
+    assert.equal(restoredDb.getThreadDetail(1).posts.find((p) => p.id === 2).is_deleted, 0);
+    restoredDb.softDeletePost(2, { audit: { actorType: 'cli', actorUsername: 'cli' } });
+    restoredDb.clearAllSessions();
+    assert.equal(restoredDb.getThreadDetail(1).posts.find((p) => p.id === 2).is_deleted, 1);
+  } finally {
+    try { migrated?.close(); } catch {}
+    try { db?.close(); } catch {}
+    try { restoredDb?.close(); } catch {}
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('P1-1回帰: 新版runBackupは合成v2 DBをv3へ移行せず元DB・複製ともv2のまま完全一致させること', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { runBackup } = require('../src/backup');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'basic-board-p1-backup-v2-'));
+  let liveV2 = null;
+  let inspectSrc = null;
+  let inspectBak = null;
+  try {
+    const srcV2Path = path.join(tmpDir, 'source_v2.db');
+    const destBakPath = path.join(tmpDir, 'backup_v2.db');
+
+    liveV2 = new DatabaseSync(srcV2Path);
+    liveV2.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA wal_autocheckpoint = 0;
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user',
+        auth_version INTEGER NOT NULL DEFAULT 0,
+        must_change_password INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE threads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+        title TEXT NOT NULL,
+        pinned_text TEXT,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE RESTRICT,
+        parent_id INTEGER,
+        author_name TEXT NOT NULL DEFAULT '名無しさん',
+        visitor_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (id, thread_id),
+        FOREIGN KEY (parent_id, thread_id) REFERENCES posts(id, thread_id) ON DELETE RESTRICT
+      );
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      PRAGMA user_version = 2;
+      INSERT INTO users (username, password_hash, role) VALUES ('v2_admin', 'scrypt$v1$16384$8$1$abc$def', 'admin');
+      INSERT INTO categories (name, display_order) VALUES ('v2保護カテゴリ', 1);
+      INSERT INTO threads (category_id, title, pinned_text, is_pinned, display_order, created_by)
+        VALUES (1, 'v2保護スレッド', 'v2案内', 1, 1, 1);
+      INSERT INTO posts (thread_id, author_name, visitor_id, content, created_by)
+        VALUES (1, 'v2_admin', 'v2vis01', 'v2のまま維持される投稿', 1);
+    `);
+    // WAL上に未チェックポイント行も残した状態でバックアップCLIを実行する
+    liveV2.exec(`INSERT INTO posts (thread_id, author_name, visitor_id, content) VALUES (1, 'WAL住民', 'walvis2', 'WAL未チェックポイント投稿');`);
+
+    const bakRes = runBackup({ srcPath: srcV2Path, destPath: destBakPath });
+    assert.equal(bakRes.success, true);
+
+    liveV2.close();
+    liveV2 = null;
+
+    inspectSrc = new DatabaseSync(srcV2Path, { readOnly: true });
+    inspectBak = new DatabaseSync(destBakPath, { readOnly: true });
+
+    assert.equal(Number(inspectSrc.prepare('PRAGMA user_version;').get().user_version), 2);
+    assert.equal(Number(inspectBak.prepare('PRAGMA user_version;').get().user_version), 2);
+
+    const getTables = (conn) =>
+      conn
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC")
+        .all()
+        .map((r) => ({ name: r.name, sql: r.sql }));
+
+    const srcTables = getTables(inspectSrc);
+    const bakTables = getTables(inspectBak);
+    assert.deepEqual(srcTables, bakTables);
+    assert.equal(srcTables.some((t) => t.name === 'admin_audit_logs'), false);
+
+    assert.deepEqual(
+      inspectBak.prepare('SELECT id, author_name, content FROM posts ORDER BY id ASC').all(),
+      inspectSrc.prepare('SELECT id, author_name, content FROM posts ORDER BY id ASC').all()
+    );
+    assert.equal(inspectBak.prepare('SELECT COUNT(*) AS c FROM posts').get().c, 2);
+  } finally {
+    try { liveV2?.close(); } catch {}
+    try { inspectSrc?.close(); } catch {}
+    try { inspectBak?.close(); } catch {}
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('P1-2 & 配備前確認回帰: 最後の1カテゴリ削除409保護＋バックアップ維持・v2→v3途中失敗時完全ROLLBACK', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { runBackup } = require('../src/backup');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'basic-board-p1-lastcat-rollback-'));
+  let db = null;
+  let failDb = null;
+  let rawCheck = null;
+  let cleanDb = null;
+  try {
+    // 1. 最後の1カテゴリ保護 (409 LAST_CATEGORY_PROTECTED) と、スレッド0件・カテゴリ1件状態でのバックアップ成功
+    const livePath = path.join(tmpDir, 'lastcat.db');
+    const bakPath = path.join(tmpDir, 'lastcat_bak.db');
+    db = createBoardDb({ dbPath: livePath });
+    const c1 = db.createCategory({ name: '残すカテゴリ', audit: { actorType: 'cli', actorUsername: 'cli' } });
+    const c2 = db.createCategory({ name: '消すカテゴリ', audit: { actorType: 'cli', actorUsername: 'cli' } });
+    const th1 = db.createThread({ categoryId: c1.id, title: '仮スレッド', audit: { actorType: 'cli', actorUsername: 'cli' } });
+    db.deleteCategory(c2.id, { audit: { actorType: 'cli', actorUsername: 'cli' } });
+    db.purgeThread(th1.id, { audit: { actorType: 'cli', actorUsername: 'cli' } });
+
+    assert.throws(
+      () => db.deleteCategory(c1.id, { audit: { actorType: 'cli', actorUsername: 'cli' } }),
+      (err) => err.statusCode === 409 && err.code === 'LAST_CATEGORY_PROTECTED'
+    );
+    assert.equal(db.getAdminOverview().summary.categoriesCount, 1);
+    db.close();
+    db = null;
+
+    const bak = runBackup({ srcPath: livePath, destPath: bakPath });
+    assert.equal(bak.success, true);
+
+    // 2. v2→v3 単一トランザクション移行：途中失敗時に admin_audit_logs と user_version=3 が残らないこと
+    const v2RollbackPath = path.join(tmpDir, 'rollback_v2.db');
+    const rawV2 = new DatabaseSync(v2RollbackPath);
+    rawV2.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user',
+        auth_version INTEGER NOT NULL DEFAULT 0,
+        must_change_password INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE threads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+        title TEXT NOT NULL,
+        pinned_text TEXT,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE RESTRICT,
+        parent_id INTEGER,
+        author_name TEXT NOT NULL DEFAULT '名無しさん',
+        visitor_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (id, thread_id),
+        FOREIGN KEY (parent_id, thread_id) REFERENCES posts(id, thread_id) ON DELETE RESTRICT
+      );
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      PRAGMA user_version = 2;
+      INSERT INTO categories (name, display_order) VALUES ('移行前カテゴリ', 1);
+      INSERT INTO threads (category_id, title) VALUES (1, '移行前スレッド');
+      INSERT INTO posts (thread_id, author_name, visitor_id, content) VALUES (1, '旧住民', 'rb01', 'ロールバック保護投稿');
+    `);
+    rawV2.close();
+
+    const baseSchemaSql = fs.readFileSync(path.join(__dirname, '../src/schema.sql'), 'utf8');
+    const brokenSchemaPath = path.join(tmpDir, 'broken_schema.sql');
+    fs.writeFileSync(
+      brokenSchemaPath,
+      `${baseSchemaSql}\nCREATE INDEX idx_intentional_failure ON nonexistent_table(id);\n`,
+      'utf8'
+    );
+
+    assert.throws(
+      () => createBoardDb({ dbPath: v2RollbackPath, schemaPath: brokenSchemaPath }),
+      /nonexistent_table/
+    );
+
+    rawCheck = new DatabaseSync(v2RollbackPath, { readOnly: true });
+    assert.equal(Number(rawCheck.prepare('PRAGMA user_version;').get().user_version), 2);
+    assert.equal(
+      rawCheck.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'admin_audit_logs'").get(),
+      undefined
+    );
+    assert.equal(
+      rawCheck.prepare('SELECT content FROM posts WHERE id = 1').get().content,
+      'ロールバック保護投稿'
+    );
+    rawCheck.close();
+    rawCheck = null;
+
+    // 正常スキーマで開き直せば安全に v3 へ移行し、既存データも残ること
+    cleanDb = createBoardDb({ dbPath: v2RollbackPath });
+    assert.equal(cleanDb.getStatus().schemaVersion, 3);
+    assert.equal(cleanDb.getThreadDetail(1).posts[0].content, 'ロールバック保護投稿');
+  } finally {
+    try { db?.close(); } catch {}
+    try { failDb?.close(); } catch {}
+    try { rawCheck?.close(); } catch {}
+    try { cleanDb?.close(); } catch {}
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

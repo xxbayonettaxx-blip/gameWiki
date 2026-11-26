@@ -230,6 +230,7 @@ async function main() {
   }
 
   const db = createBoardDb({ dbPath });
+  const cliAudit = { actorType: 'cli', actorUsername: 'cli' };
 
   try {
     // 1. カテゴリ・スレッド一覧の表示
@@ -264,7 +265,7 @@ async function main() {
         return;
       }
       const displayOrder = rawOrder !== undefined ? parseNonNegativeInt(rawOrder, '表示順') : null;
-      const created = db.createCategory({ name, displayOrder });
+      const created = db.createCategory({ name, displayOrder, audit: cliAudit });
       console.log(
         `[MODERATE] カテゴリ #${created.id}「${created.name}」（表示順: ${created.display_order}）を追加しました。`
       );
@@ -283,7 +284,7 @@ async function main() {
       }
       const categoryId = parsePositiveInt(rawCatId, 'カテゴリID');
       const displayOrder = rawOrder !== undefined ? parseNonNegativeInt(rawOrder, '表示順') : undefined;
-      const res = db.updateCategory({ categoryId, name: newName, displayOrder });
+      const res = db.updateCategory({ categoryId, name: newName, displayOrder, audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] カテゴリ #${categoryId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -306,7 +307,7 @@ async function main() {
       }
       const categoryId = parsePositiveInt(rawCatId, 'カテゴリID');
       const displayOrder = parseNonNegativeInt(rawOrder, '表示順');
-      const res = db.updateCategory({ categoryId, displayOrder });
+      const res = db.updateCategory({ categoryId, displayOrder, audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] カテゴリ #${categoryId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -337,6 +338,7 @@ async function main() {
         pinnedText,
         isPinned: Boolean(pinnedText && String(pinnedText).trim() !== ''),
         displayOrder,
+        audit: cliAudit,
       });
       console.log(
         `[MODERATE] カテゴリ #${created.category_id} にスレッド #${created.id}「${created.title}」（表示順: ${created.display_order}）を追加しました。`
@@ -356,7 +358,7 @@ async function main() {
       }
       const threadId = parsePositiveInt(rawThreadId, 'スレッドID');
       const displayOrder = rawOrder !== undefined ? parseNonNegativeInt(rawOrder, '表示順') : undefined;
-      const res = db.updateThread({ threadId, title: newTitle, displayOrder });
+      const res = db.updateThread({ threadId, title: newTitle, displayOrder, audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] スレッド #${threadId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -379,7 +381,7 @@ async function main() {
       }
       const threadId = parsePositiveInt(rawThreadId, 'スレッドID');
       const displayOrder = parseNonNegativeInt(rawOrder, '表示順');
-      const res = db.updateThread({ threadId, displayOrder });
+      const res = db.updateThread({ threadId, displayOrder, audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] スレッド #${threadId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -430,7 +432,7 @@ async function main() {
       }
 
       // --force 指定時の本実行
-      const result = db.purgePostTree(postId);
+      const result = db.purgePostTree(postId, { audit: cliAudit });
       if (!result.found) {
         console.error(`[MODERATE] 投稿 #${postId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -477,7 +479,7 @@ async function main() {
       }
 
       // --force 指定時の本実行
-      const result = db.purgeThread(threadId);
+      const result = db.purgeThread(threadId, { audit: cliAudit });
       if (!result.found) {
         console.error(`[MODERATE] スレッド #${threadId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -500,7 +502,7 @@ async function main() {
         return;
       }
       const postId = parsePositiveInt(rawPostId, '投稿ID');
-      const res = db.updatePost({ postId, content: newContent, authorName: newAuthorName });
+      const res = db.updatePost({ postId, content: newContent, authorName: newAuthorName, audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] 投稿 #${postId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -550,7 +552,7 @@ async function main() {
       const password = await promptPasswordWithConfirm('新規パスワード');
       const scryptQueue = createScryptQueue();
       const passwordHash = await scryptQueue.hashPassword(password);
-      const created = db.createUser({ username, passwordHash, role, mustChangePassword: false });
+      const created = db.createUser({ username, passwordHash, role, mustChangePassword: false, audit: cliAudit });
       console.log(`[MODERATE] [SUCCESS] ユーザー #${created.id}「${created.username}」(role=${created.role}) を作成しました。`);
       return;
     }
@@ -576,7 +578,7 @@ async function main() {
       const tempPassword = await promptPasswordWithConfirm('仮パスワード');
       const scryptQueue = createScryptQueue();
       const newPasswordHash = await scryptQueue.hashPassword(tempPassword);
-      const res = db.resetPasswordByUsername({ username, newPasswordHash });
+      const res = db.resetPasswordByUsername({ username, newPasswordHash, reason, audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] ユーザー「${username}」は見つかりませんでした。`);
         process.exitCode = 1;
@@ -601,7 +603,7 @@ async function main() {
       }
       const username = validateUsername(rawUsername);
       const role = validateUserRole(rawRole);
-      const res = db.setUserRoleByUsername({ username, role });
+      const res = db.setUserRoleByUsername({ username, role, audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] ユーザー「${username}」は見つかりませんでした。`);
         process.exitCode = 1;
@@ -621,7 +623,7 @@ async function main() {
         return;
       }
       const username = validateUsername(rawUsername);
-      const res = db.revokeAllSessionsByUsername(username);
+      const res = db.revokeAllSessionsByUsername(username, { audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] ユーザー「${username}」は見つかりませんでした。`);
         process.exitCode = 1;
@@ -643,7 +645,7 @@ async function main() {
     const postId = parsePositiveInt(rawPostId, '投稿ID');
 
     if (action === 'delete') {
-      const res = db.softDeletePost(postId);
+      const res = db.softDeletePost(postId, { audit: cliAudit });
       if (!res.found) {
         console.error(`[MODERATE] 投稿 #${postId} は見つかりませんでした。`);
         process.exitCode = 1;
@@ -658,7 +660,7 @@ async function main() {
     }
 
     const shouldPin = action === 'pin';
-    const res = db.setPostPinned(postId, shouldPin);
+    const res = db.setPostPinned(postId, shouldPin, { audit: cliAudit });
     if (!res.found) {
       console.error(`[MODERATE] 投稿 #${postId} は見つかりませんでした。`);
       process.exitCode = 1;

@@ -1,11 +1,10 @@
 -- =====================================================================
--- basic_board v0.5 データベーススキーマ正本 (src/schema.sql)
--- 設計書 C:\product\project\game-wiki\基本構成・機能\DB設計.md 第3版と完全一致
+-- basic_board v1.1 データベーススキーマ正本 (src/schema.sql)
+-- 設計書 管理画面設計書・実装ロードマップ（第2.1版）PRAGMA user_version = 3 準拠
+-- ※ 本ファイルは単一トランザクションで原子適用できるよう純粋なDDLのみを定義する。
+-- ※ 接続時PRAGMA（busy_timeout / journal_mode = WAL / foreign_keys = ON）は
+--    src/db.js 側でトランザクション外にて設定・検証する。
 -- =====================================================================
-
--- 0. 接続ごとの必須設定（src/db.js 側でも実行後に戻り値をプログラム検証する）
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
 
 -- 1. ユーザーテーブル（外部キー参照元のため先に定義。v1.0認証対応）
 -- ※ char(12288)=全角空白(U+3000), char(9)=タブ, char(10)=LF, char(13)=CR を除去して空欄を拒否
@@ -89,3 +88,21 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+-- 7. 管理操作監査ログテーブル（v1.1 Step 1追加）
+-- ・Web管理操作とCLI操作の両方を状態変更と同一トランザクションで記録する
+-- ・detail_json は許可キー要約のみ最大 2048 bytes に制限し、秘密情報を含めない
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_type TEXT NOT NULL CHECK(actor_type IN ('admin_web', 'cli')),
+    actor_user_id INTEGER,
+    actor_username TEXT NOT NULL CHECK(length(actor_username) BETWEEN 1 AND 64),
+    action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 64),
+    target_type TEXT NOT NULL CHECK(length(target_type) BETWEEN 1 AND 32),
+    target_id TEXT NOT NULL CHECK(length(target_id) BETWEEN 1 AND 128),
+    detail_json TEXT NOT NULL CHECK(json_valid(detail_json) AND length(CAST(detail_json AS BLOB)) <= 2048),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_logs(created_at DESC, id DESC);

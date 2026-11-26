@@ -85,10 +85,11 @@ function sendJson(res, statusCode, payload, extraHeaders = {}) {
 }
 
 // ---------------------------------------------------------------------
-// 2. 更新系API（POST）向けの CSRF / Content-Type / Origin完全一致 防御検査
+// 2. 更新系API（POST/PATCH/DELETE）向けの CSRF / Origin完全一致 防御検査
 // フォーム送信等の単純リクエストによるCSRFや、別オリジン・スキーム違いからの不正要求を拒否する。
+// Content-Type 検査は将来のバイナリ画像API分離を見据えて別関数へ切り離す（R3）。
 // ---------------------------------------------------------------------
-function verifyMutatingRequestHeaders(
+function verifyOriginAndSecFetch(
   req,
   { requireOrigin = false, allowedOrigin = null, trustProxy = false } = {}
 ) {
@@ -139,13 +140,20 @@ function verifyMutatingRequestHeaders(
       throw new ValidationError('送信元オリジンが一致しません。', 403);
     }
   }
+}
 
+function verifyJsonContentType(req) {
   // Content-Type が application/json であることを要求（HTML form からの直送信を遮断）
   const contentType = String(req.headers['content-type'] || '').toLowerCase();
   const mediaType = contentType.split(';')[0].trim();
   if (mediaType !== 'application/json') {
     throw new ValidationError('Content-Type には application/json を指定してください。', 415);
   }
+}
+
+function verifyMutatingRequestHeaders(req, options = {}) {
+  verifyOriginAndSecFetch(req, options);
+  verifyJsonContentType(req);
 }
 
 // ---------------------------------------------------------------------
@@ -262,33 +270,12 @@ function readJsonBody(req, maxBodyBytes) {
 }
 
 // ---------------------------------------------------------------------
-// 4. 管理トークンの定数時間（タイミング攻撃耐性）照合関数
-// ---------------------------------------------------------------------
-function verifyAdminBearerToken(req, configuredAdminToken) {
-  if (!configuredAdminToken) {
-    return false;
-  }
-  const authHeader = req.headers.authorization;
-  if (typeof authHeader !== 'string' || !authHeader.startsWith('Bearer ')) {
-    return false;
-  }
-  const provided = authHeader.slice('Bearer '.length).trim();
-  const a = Buffer.from(provided, 'utf8');
-  const b = Buffer.from(configuredAdminToken, 'utf8');
-  if (a.length !== b.length || a.length === 0) {
-    return false;
-  }
-  return crypto.timingSafeEqual(a, b);
-}
-
-// ---------------------------------------------------------------------
 // 5. アプリケーションサーバー生成ファクトリ関数
 // ---------------------------------------------------------------------
 function createApp(options = {}) {
   const {
     db,
     idSecret,
-    adminToken = null,
     trustProxy = false,
     allowedOrigin = null,
     allowSignup = true,
@@ -320,14 +307,6 @@ function createApp(options = {}) {
   const allowDevInsecureCookie =
     devInsecureCookie === true || String(devInsecureCookie).toLowerCase() === 'true';
   const scryptQueue = customScryptQueue || createScryptQueue(scryptOptions);
-
-  // ADMIN_TOKEN が未設定または見本値のままならHTTP管理削除を無効化する
-  const validAdminToken =
-    typeof adminToken === 'string' &&
-    adminToken.trim().length >= 16 &&
-    !adminToken.trim().startsWith('CHANGE_ME')
-      ? adminToken.trim()
-      : null;
 
   const postLimiter = createWindowLimiter({
     windowMs: rateLimitWindowMs,
@@ -401,6 +380,57 @@ function createApp(options = {}) {
       allowedOrigin: configuredAllowedOrigin,
       trustProxy,
     });
+  }
+
+  // 管理画面向け統一セッション認可チェック（第1段階：API入口での即座拒否）
+  function requireAdminSession(req, res, nowIso) {
+    const sess = resolveRequestSession(req, nowIso);
+    if (sess.status === 'invalid') {
+      sendJson(
+        res,
+        401,
+        { error: 'ログインの有効期限が切れています。再ログインしてください。', code: 'SESSION_EXPIRED' },
+        buildClearCookieHeaders()
+      );
+      return null;
+    }
+    if (sess.status !== 'valid') {
+      sendJson(res, 401, {
+        error: '管理者アカウントでのログインが必要です。',
+        code: 'UNAUTHORIZED',
+      });
+      return null;
+    }
+    if (sess.auth.user.role !== 'admin') {
+      sendJson(res, 403, {
+        error: 'この操作には管理者権限が必要です。',
+        code: 'FORBIDDEN',
+      });
+      return null;
+    }
+    if (sess.auth.user.mustChangePassword) {
+      sendJson(res, 403, {
+        error: '仮パスワードを変更して再ログインするまで管理画面は利用できません。',
+        code: 'PASSWORD_CHANGE_REQUIRED',
+      });
+      return null;
+    }
+    return {
+      sess,
+      buildTxAuth: () => ({
+        sessionTokenHash: sess.tokenHash,
+        expectedUserId: sess.auth.user.id,
+        expectedAuthVersion: sess.auth.authVersion,
+        nowIso: nowFn().toISOString(),
+      }),
+    };
+  }
+
+  function ensurePlainBodyObject(body) {
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      throw new ValidationError('リクエスト形式が不正です（JSONオブジェクトが必要です）。', 400);
+    }
+    return body;
   }
 
   // -------------------------------------------------------------------
@@ -505,6 +535,26 @@ function createApp(options = {}) {
     const fileBuffer = fs.readFileSync(realCandidatePath);
     const etag = `"${crypto.createHash('sha256').update(fileBuffer).digest('base64url').slice(0, 24)}"`;
     setSecurityHeaders(res);
+
+    const lowerTarget = relativeTarget.toLowerCase();
+    const noStoreAsset =
+      lowerTarget === '/admin.html' ||
+      lowerTarget === '/admin.js' ||
+      lowerTarget === '/admin.css';
+
+    if (noStoreAsset) {
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Length': fileBuffer.length,
+        'Cache-Control': 'no-store',
+      });
+      if (req.method === 'HEAD') {
+        res.end();
+      } else {
+        res.end(fileBuffer);
+      }
+      return;
+    }
 
     if (matchesIfNoneMatch(req.headers['if-none-match'], etag)) {
       res.writeHead(304, {
@@ -1036,6 +1086,111 @@ function createApp(options = {}) {
         return;
       }
 
+      // ===============================================================
+      // 管理画面専用 API（v1.1 統一セッション認可 ＋ 確定直前再認可 ＋ 同一TX監査）
+      // 旧 verifyAdminBearerToken 経路は v1.1 で完全廃止済み。
+      // ===============================================================
+
+      // [GET] 管理画面概要（統計・カテゴリ＋スレッド一覧）
+      if (pathname === '/api/admin/overview') {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+        const overview = db.getAdminOverview();
+        sendJson(res, 200, {
+          user: {
+            id: adminCtx.sess.auth.user.id,
+            username: adminCtx.sess.auth.user.username,
+            role: adminCtx.sess.auth.user.role,
+          },
+          ...overview,
+        });
+        return;
+      }
+
+      // [GET] 管理用ユーザー一覧（ページング上限あり・hash類一切除外）
+      if (pathname === '/api/admin/users') {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const nowIso = nowFn().toISOString();
+        const adminCtx = requireAdminSession(req, res, nowIso);
+        if (!adminCtx) return;
+        const result = db.listAdminUsers({
+          limit: parsedUrl.searchParams.get('limit'),
+          offset: parsedUrl.searchParams.get('offset'),
+          nowIso,
+        });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      // [GET] 管理操作監査ログ一覧（カーソルページング）
+      if (pathname === '/api/admin/audit-logs') {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+        const result = db.listAdminAuditLogs({
+          limit: parsedUrl.searchParams.get('limit'),
+          beforeId: parsedUrl.searchParams.get('before_id'),
+        });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      // [GET] 管理用スレッド配下投稿一覧（論理削除済みはSQL側でマスク済み）
+      const adminThreadPostsMatch = pathname.match(/^\/api\/admin\/threads\/([^/]+)\/posts$/);
+      if (adminThreadPostsMatch) {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+        const threadId = parsePositiveInt(adminThreadPostsMatch[1], 'スレッドID');
+        const detail = db.getAdminThreadPosts(threadId);
+        if (!detail) {
+          sendJson(res, 404, { error: '指定されたスレッドが見つかりません。' });
+          return;
+        }
+        sendJson(res, 200, detail);
+        return;
+      }
+
+      // [GET] スレッド物理削除の事前プレビュー（対象タイトル＋現在投稿件数）
+      const adminThreadPreviewMatch = pathname.match(/^\/api\/admin\/threads\/([^/]+)\/delete-preview$/);
+      if (adminThreadPreviewMatch) {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+        const threadId = parsePositiveInt(adminThreadPreviewMatch[1], 'スレッドID');
+        const preview = db.getPurgeThreadPreview(threadId);
+        if (!preview.found) {
+          sendJson(res, 404, { error: '指定されたスレッドが見つかりません。' });
+          return;
+        }
+        sendJson(res, 200, {
+          thread: {
+            id: preview.thread.id,
+            category_id: preview.thread.category_id,
+            category_name: preview.category.name,
+            title: preview.thread.title,
+          },
+          postsCount: preview.postsCount,
+        });
+        return;
+      }
+
       // [POST] 管理者専用：投稿の論理削除（is_deleted = 1）
       const adminDeleteMatch = pathname.match(/^\/api\/admin\/posts\/([^/]+)\/delete$/);
       if (adminDeleteMatch) {
@@ -1043,18 +1198,13 @@ function createApp(options = {}) {
           sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'POST' });
           return;
         }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
 
-        checkMutatingHeaders(req, { requireOrigin: hasAnyCookieHeader(req) });
-
-        if (!verifyAdminBearerToken(req, validAdminToken)) {
-          sendJson(res, 401, { error: '管理者認証が必要です。' });
-          return;
-        }
-
-        // ボディが空でもサイズ上限検査を通す
-        await readJsonBody(req, maxBodyBytes);
+        ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
         const postId = parsePositiveInt(adminDeleteMatch[1], '投稿ID');
-        const result = db.softDeletePost(postId);
+        const result = db.softDeletePost(postId, { adminAuth: adminCtx.buildTxAuth() });
         if (!result.found) {
           sendJson(res, 404, { error: '指定された投稿が見つかりません。' });
           return;
@@ -1070,26 +1220,183 @@ function createApp(options = {}) {
           sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'POST' });
           return;
         }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
 
-        checkMutatingHeaders(req, { requireOrigin: hasAnyCookieHeader(req) });
-
-        if (!verifyAdminBearerToken(req, validAdminToken)) {
-          sendJson(res, 401, { error: '管理者認証が必要です。' });
-          return;
-        }
-
-        const body = await readJsonBody(req, maxBodyBytes);
+        const body = ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
         const postId = parsePositiveInt(adminPinMatch[1], '投稿ID');
-        if (body !== null && body.pinned !== undefined && typeof body.pinned !== 'boolean') {
+        if (body.pinned !== undefined && typeof body.pinned !== 'boolean') {
           throw new ValidationError('pinned には true または false を指定してください。', 400);
         }
-        const pinnedFlag = body?.pinned === undefined ? true : body.pinned;
-        const result = db.setPostPinned(postId, pinnedFlag);
+        const pinnedFlag = body.pinned === undefined ? true : body.pinned;
+        const result = db.setPostPinned(postId, pinnedFlag, { adminAuth: adminCtx.buildTxAuth() });
         if (!result.found) {
           sendJson(res, 404, { error: '指定された投稿が見つかりません。' });
           return;
         }
         sendJson(res, 200, { ok: true, postId, isPinned: result.isPinned });
+        return;
+      }
+
+      // [POST] 管理者専用：カテゴリ追加
+      if (pathname === '/api/admin/categories') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'POST' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+
+        const body = ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
+        const rawOrder = body.displayOrder !== undefined ? body.displayOrder : body.display_order;
+        const category = db.createCategory({
+          name: body.name,
+          displayOrder: rawOrder === undefined ? null : rawOrder,
+          adminAuth: adminCtx.buildTxAuth(),
+        });
+        sendJson(res, 201, { category });
+        return;
+      }
+
+      // [PATCH / DELETE] 管理者専用：カテゴリ更新・削除
+      const adminCategoryItemMatch = pathname.match(/^\/api\/admin\/categories\/([^/]+)$/);
+      if (adminCategoryItemMatch) {
+        if (req.method !== 'PATCH' && req.method !== 'DELETE') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'PATCH, DELETE' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+
+        const categoryId = parsePositiveInt(adminCategoryItemMatch[1], 'カテゴリID');
+        const body = ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
+
+        if (req.method === 'PATCH') {
+          const rawOrder = body.displayOrder !== undefined ? body.displayOrder : body.display_order;
+          if (body.name === undefined && rawOrder === undefined) {
+            throw new ValidationError('更新項目（name または displayOrder）を指定してください。', 400);
+          }
+          if (body.name === null || rawOrder === null) {
+            throw new ValidationError('更新項目に null は指定できません。', 400);
+          }
+          const result = db.updateCategory({
+            categoryId,
+            name: body.name,
+            displayOrder: rawOrder,
+            adminAuth: adminCtx.buildTxAuth(),
+          });
+          if (!result.found) {
+            sendJson(res, 404, { error: '指定されたカテゴリが見つかりません。' });
+            return;
+          }
+          sendJson(res, 200, { category: result.category });
+          return;
+        }
+
+        const result = db.deleteCategory(categoryId, { adminAuth: adminCtx.buildTxAuth() });
+        if (!result.found) {
+          sendJson(res, 404, { error: '指定されたカテゴリが見つかりません。' });
+          return;
+        }
+        sendJson(res, 200, { ok: true, deletedCategory: result.deletedCategory });
+        return;
+      }
+
+      // [POST] 管理者専用：スレッド追加
+      if (pathname === '/api/admin/threads') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'POST' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+
+        const body = ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
+        const rawCatId = body.categoryId !== undefined ? body.categoryId : body.category_id;
+        const categoryId = parsePositiveInt(rawCatId, 'カテゴリID');
+        const rawPinnedText = body.pinnedText !== undefined ? body.pinnedText : body.pinned_text;
+        const rawIsPinned = body.isPinned !== undefined ? body.isPinned : body.is_pinned;
+        const rawOrder = body.displayOrder !== undefined ? body.displayOrder : body.display_order;
+
+        const thread = db.createThread({
+          categoryId,
+          title: body.title,
+          pinnedText: rawPinnedText === undefined ? null : rawPinnedText,
+          isPinned: rawIsPinned === undefined ? false : rawIsPinned,
+          displayOrder: rawOrder === undefined ? null : rawOrder,
+          createdBy: adminCtx.sess.auth.user.id,
+          adminAuth: adminCtx.buildTxAuth(),
+        });
+        sendJson(res, 201, { thread });
+        return;
+      }
+
+      // [PATCH / DELETE] 管理者専用：スレッド更新・物理削除（直前件数照合付き）
+      const adminThreadItemMatch = pathname.match(/^\/api\/admin\/threads\/([^/]+)$/);
+      if (adminThreadItemMatch) {
+        if (req.method !== 'PATCH' && req.method !== 'DELETE') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'PATCH, DELETE' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+
+        const threadId = parsePositiveInt(adminThreadItemMatch[1], 'スレッドID');
+        const body = ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
+
+        if (req.method === 'PATCH') {
+          const rawPinnedText = body.pinnedText !== undefined ? body.pinnedText : body.pinned_text;
+          const rawIsPinned = body.isPinned !== undefined ? body.isPinned : body.is_pinned;
+          const rawOrder = body.displayOrder !== undefined ? body.displayOrder : body.display_order;
+          if (
+            body.title === undefined &&
+            rawPinnedText === undefined &&
+            rawIsPinned === undefined &&
+            rawOrder === undefined
+          ) {
+            throw new ValidationError('更新項目を1つ以上指定してください。', 400);
+          }
+          if (body.title === null || rawOrder === null) {
+            throw new ValidationError('title または displayOrder に null は指定できません。', 400);
+          }
+          const result = db.updateThread({
+            threadId,
+            title: body.title,
+            pinnedText: rawPinnedText,
+            isPinned: rawIsPinned,
+            displayOrder: rawOrder,
+            adminAuth: adminCtx.buildTxAuth(),
+          });
+          if (!result.found) {
+            sendJson(res, 404, { error: '指定されたスレッドが見つかりません。' });
+            return;
+          }
+          sendJson(res, 200, { thread: result.thread });
+          return;
+        }
+
+        const expectedPostCount =
+          body.expectedPostCount !== undefined ? body.expectedPostCount : body.expected_post_count;
+        const result = db.purgeThread(threadId, {
+          requireConfirmation: true,
+          confirmTitle: body.confirmTitle,
+          expectedPostCount,
+          adminAuth: adminCtx.buildTxAuth(),
+        });
+        if (!result.found) {
+          sendJson(res, 404, { error: '指定されたスレッドが見つかりません。' });
+          return;
+        }
+        sendJson(res, 200, {
+          ok: true,
+          deletedThread: result.deletedThread,
+          deletedPostsCount: result.deletedPostsCount,
+        });
         return;
       }
 
@@ -1104,7 +1411,10 @@ function createApp(options = {}) {
     } catch (err) {
       if (err instanceof ValidationError) {
         const extra = err.statusCode === 413 ? { Connection: 'close' } : {};
-        sendJson(res, err.statusCode, { error: err.message }, extra);
+        const errorBody = { error: err.message };
+        if (err.code) errorBody.code = err.code;
+        if (err.details) errorBody.details = err.details;
+        sendJson(res, err.statusCode, errorBody, extra);
       } else if (err instanceof AuthQueueFullError) {
         authMetrics.queueRejected503 += 1;
         sendJson(res, 503, { error: err.message }, { 'Retry-After': '2' });

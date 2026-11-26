@@ -598,6 +598,16 @@ svg.icon {
   font-size: 15px;
   margin-right: 8px;
 }
+.member-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.admin-entry-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 .role-badge {
   display: inline-block;
   font-size: 10px;
@@ -1250,6 +1260,50 @@ legend {
   text-align: center;
   color: var(--muted);
   font-size: 12.5px;
+}
+
+/* ②b スレッド案内文（threads.pinned_text の単一ソース表示） */
+.thread-guide {
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 7px;
+  max-width: 100%;
+}
+
+.thread-guide-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.thread-guide-badge {
+  display: inline-block;
+  font: 700 9.5px/1 Arial, sans-serif;
+  letter-spacing: 0.08em;
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border: 1px solid var(--accent);
+}
+
+.thread-guide-header h3 {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.thread-guide-text {
+  font-size: var(--body-size);
+  color: var(--ink);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
 }
 
 /* ③ ピン留めされた通常投稿・返信ツリー */
