@@ -2016,6 +2016,42 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       await waitFor("document.querySelector('#purge-thread-dialog').open === false");
       await evaluate('window.fetch = window.__f1OrigFetch; delete window.__releasePreviewA;');
 
+      // F1-d: 削除プレビュー取得中に編集ダイアログ(#editor)を開いて入力した後にプレビューが遅延到着しても、#purge-thread-dialogが開かず編集画面・フォーカスが維持されること
+      await evaluate(`(() => {
+        let releasePreviewOverlap = null;
+        window.__releasePreviewOverlap = () => releasePreviewOverlap?.();
+        window.fetch = (input, init) => {
+          const u = String(input);
+          if (u.includes('/api/admin/threads/${thA.id}/delete-preview')) {
+            return window.__f1OrigFetch(input, { ...init, signal: undefined }).then(
+              (resp) => new Promise((resolve) => { releasePreviewOverlap = () => resolve(resp); })
+            );
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click(`[data-action="purge-thread"][data-thread-id="${thA.id}"]`);
+      await delay(20);
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate("document.querySelector('#dialog-thread-title').focus()");
+      await setField('#dialog-thread-title', '編集中タイトル維持確認');
+      await evaluate('window.__releasePreviewOverlap()');
+      await delay(80);
+      const editorAfterDelayedPreview = await evaluate(`({
+        purgeOpen: document.querySelector('#purge-thread-dialog').open,
+        editorOpen: document.querySelector('#editor').open,
+        titleVal: document.querySelector('#dialog-thread-title').value,
+        activeId: document.activeElement?.id,
+      })`);
+      assert.equal(editorAfterDelayedPreview.purgeOpen, false);
+      assert.equal(editorAfterDelayedPreview.editorOpen, true);
+      assert.equal(editorAfterDelayedPreview.titleVal, '編集中タイトル維持確認');
+      assert.equal(editorAfterDelayedPreview.activeId, 'dialog-thread-title');
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#editor').open === false");
+      await evaluate('window.fetch = window.__f1OrigFetch; delete window.__releasePreviewOverlap;');
+
       // F1-b: Aの削除送信中 → Escで閉じてB(0件)を開く → Aへ409応答が返ってもBの対象/件数/入力/エラー欄が一切汚染されないこと
       await evaluate(`(() => {
         let releaseA409 = null;
@@ -2201,14 +2237,126 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2エラー復帰スレ').length,
         1
       );
+
+      // F2-d: 保存応答待ちに Esc で閉じ → 開き直して再送しても二重作成されないこと（成功後に開き直した画面は維持＋再入力可能）
+      await evaluate(`(() => {
+        window.__f2PostCount = 0;
+        let releaseCreateReopen = null;
+        window.__releaseCreateReopen = () => releaseCreateReopen?.();
+        window.fetch = (input, init) => {
+          const u = String(input);
+          const m = (init?.method || 'GET').toUpperCase();
+          if (m === 'POST' && u.endsWith('/api/admin/threads')) {
+            window.__f2PostCount += 1;
+            return window.__f1OrigFetch(input, init).then(
+              (resp) => new Promise((resolve) => { releaseCreateReopen = () => resolve(resp); })
+            );
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2開き直し重複検証スレ');
+      await click('#dialog-submit');
+      assert.equal(await evaluate('window.__f2PostCount'), 1);
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#editor').open === false");
+
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      assert.equal(await evaluate("document.querySelector('#dialog-submit').disabled"), true);
+      assert.ok((await evaluate("document.querySelector('#dialog-error').textContent")).includes('処理中'));
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2開き直し重複検証スレ');
+      await evaluate(`(() => {
+        const btn = document.querySelector('#dialog-submit');
+        const form = document.querySelector('#editor-form');
+        btn.click();
+        form.requestSubmit();
+      })()`);
+      await evaluate("document.querySelector('#dialog-thread-title').focus()");
+      await pressKey('Enter', 'Enter', 13);
+      assert.equal(await evaluate('window.__f2PostCount'), 1);
+
+      await evaluate('window.__releaseCreateReopen()');
+      await waitFor("document.querySelector('#dialog-submit').disabled === false");
+      await delay(80);
+      assert.equal(await evaluate("document.querySelector('#editor').open"), true);
+      assert.equal(await evaluate("document.querySelector('#dialog-error').textContent"), '');
+      assert.equal(await evaluate('window.__f2PostCount'), 1);
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2開き直し重複検証スレ').length,
+        1
+      );
+      assert.equal(
+        db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2開き直し重複検証スレ').length,
+        1
+      );
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#editor').open === false");
+
+      // F2-e: 保存応答待ちに Esc で閉じ → 開き直したあと1件目が失敗 → ロック解除されエラー表示後に再送成功できること
+      await evaluate(`(() => {
+        window.__f2PostCount = 0;
+        let releaseFail500 = null;
+        window.__releaseCreateFail500 = () => releaseFail500?.();
+        window.fetch = (input, init) => {
+          const u = String(input);
+          const m = (init?.method || 'GET').toUpperCase();
+          if (m === 'POST' && u.endsWith('/api/admin/threads')) {
+            window.__f2PostCount += 1;
+            if (window.__f2PostCount === 1) {
+              return new Promise((resolve) => {
+                releaseFail500 = () => resolve(new Response(JSON.stringify({ error: '一時障害テスト' }), {
+                  status: 500,
+                  headers: { 'Content-Type': 'application/json' },
+                }));
+              });
+            }
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2開き直し失敗後再送スレ');
+      await click('#dialog-submit');
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#editor').open === false");
+
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      assert.equal(await evaluate("document.querySelector('#dialog-submit').disabled"), true);
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2開き直し失敗後再送スレ');
+      await evaluate('window.__releaseCreateFail500()');
+      await waitFor("document.querySelector('#dialog-submit').disabled === false && document.querySelector('#dialog-error')?.textContent.includes('一時障害テスト')");
+
+      await evaluate("document.querySelector('#editor-form').requestSubmit()");
+      await waitFor("document.querySelector('#editor').open === false");
+      assert.equal(await evaluate('window.__f2PostCount'), 2);
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2開き直し失敗後再送スレ').length,
+        1
+      );
+      assert.equal(
+        db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2開き直し失敗後再送スレ').length,
+        1
+      );
     } finally {
       await evaluate(`
         if (window.__f1OrigFetch) { window.fetch = window.__f1OrigFetch; }
         delete window.__f1OrigFetch;
         delete window.__releasePreviewA;
+        delete window.__releasePreviewOverlap;
         delete window.__releaseA409;
         delete window.__releaseA200;
         delete window.__releaseCreateThread;
+        delete window.__releaseCreateReopen;
+        delete window.__releaseCreateFail500;
         delete window.__f2PostCount;
       `).catch(() => {});
       const cleanupCat = db.listCategoriesWithThreads().find((c) => c.id === catF.id);

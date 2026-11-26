@@ -33,6 +33,7 @@
   const CATEGORY_THEMES = ['violet', 'blue', 'mint', 'sand'];
   const USERS_PAGE_LIMIT = 50;
   const AUDIT_PAGE_LIMIT = 50;
+  const EDITOR_IN_FLIGHT_NOTICE = '前回の送信を処理中です。完了までお待ちください。';
 
   const SECTIONS = [
     ['overview', 'home', '概要'],
@@ -87,13 +88,16 @@
     auditNextBeforeId: null,
     dialog: null,
     editorDialogSeq: 0,
+    pendingEditorActions: new Set(),
     triggerEl: null,
     purgeContext: null,
     purgePreviewSeq: 0,
     purgePreviewAbortCtrl: null,
     purgeDialogSeq: 0,
+    pendingPurgeThreadIds: new Set(),
     deleteCatContext: null,
     deleteCatDialogSeq: 0,
+    pendingDeleteCategoryIds: new Set(),
     pendingPinPostIds: new Set(),
     toastTimer: null,
   };
@@ -1078,6 +1082,7 @@
   }
 
   async function switchPage(nextPage, { focusMain = false, focusNav = false } = {}) {
+    cancelPendingPurgePreview();
     state.page = SECTIONS.some(([key]) => key === nextPage) ? nextPage : 'overview';
     if (state.page !== 'structure' && state.page !== 'overview') {
       state.query = '';
@@ -1123,6 +1128,14 @@
     return controlEl;
   }
 
+  function cancelPendingPurgePreview() {
+    state.purgePreviewSeq += 1;
+    if (state.purgePreviewAbortCtrl) {
+      state.purgePreviewAbortCtrl.abort();
+      state.purgePreviewAbortCtrl = null;
+    }
+  }
+
   function hasOpenModalDialog() {
     return Boolean(
       $('#editor')?.open || $('#purge-thread-dialog')?.open || $('#delete-category-dialog')?.open
@@ -1161,6 +1174,13 @@
     }
   }
 
+  function buildEditorActionKey(action, { categoryId = null, threadId = null, postId = null } = {}) {
+    if (action === 'edit-category' && categoryId) return `edit-category:${categoryId}`;
+    if (action === 'edit-thread' && threadId) return `edit-thread:${threadId}`;
+    if (action === 'hide-post' && postId) return `hide-post:${postId}`;
+    return action;
+  }
+
   function openEditorDialog(action, triggerEl) {
     const categoryId = triggerEl?.dataset?.categoryId ? Number(triggerEl.dataset.categoryId) : null;
     const threadId = triggerEl?.dataset?.threadId ? Number(triggerEl.dataset.threadId) : null;
@@ -1175,11 +1195,17 @@
       return;
     }
 
+    // 削除プレビュー取得中に編集ダイアログを開いた場合、遅延到着したプレビューが上に重なるのを防ぐ
+    cancelPendingPurgePreview();
+
     const submitLabel = action === 'hide-post' ? '非表示にする' : '保存';
+    const actionKey = buildEditorActionKey(action, { categoryId, threadId, postId });
+    const priorPending = state.pendingEditorActions.has(actionKey);
     const token = ++state.editorDialogSeq;
     state.dialog = {
       token,
       action,
+      actionKey,
       categoryId,
       threadId,
       postId,
@@ -1194,7 +1220,7 @@
     const titleEl = $('#dialog-title');
     const submitBtn = $('#dialog-submit');
     content.replaceChildren();
-    errorEl.textContent = '';
+    errorEl.textContent = priorPending ? EDITOR_IN_FLIGHT_NOTICE : '';
 
     let focusTarget = null;
 
@@ -1321,7 +1347,7 @@
       appendDialogField(content, 'スレッドの優先固定', pinSelect);
     }
 
-    setEditorSubmitBusy(false, submitLabel);
+    setEditorSubmitBusy(priorPending, submitLabel);
     const dialog = $('#editor');
     if (dialog && typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
@@ -1347,10 +1373,15 @@
     ev.preventDefault();
     const dlg = state.dialog;
     if (!dlg || dlg.submitting) return;
+    if (state.pendingEditorActions.has(dlg.actionKey)) {
+      setEditorSubmitBusy(true, dlg.submitLabel);
+      $('#dialog-error').textContent = EDITOR_IN_FLIGHT_NOTICE;
+      return;
+    }
 
     const form = ev.currentTarget;
     const values = new FormData(form);
-    const { action, categoryId, threadId, postId, submitLabel } = dlg;
+    const { action, actionKey, categoryId, threadId, postId, submitLabel } = dlg;
     const savedTriggerSelector = state.triggerSelector;
     $('#dialog-error').textContent = '';
 
@@ -1364,9 +1395,17 @@
       return;
     }
 
-    // 応答待ちの連打・連続Enterによる二重送信を抑止する（失敗時は編集して再送できるよう解除）
+    // 応答待ちの連打・連続Enter・閉じて開き直しによる重複送信を抑止する
     dlg.submitting = true;
+    state.pendingEditorActions.add(actionKey);
     setEditorSubmitBusy(true, submitLabel);
+
+    const isReopenedSameActionDialog = () => Boolean(
+      state.dialog &&
+      state.dialog.token !== dlg.token &&
+      state.dialog.actionKey === actionKey &&
+      $('#editor')?.open
+    );
 
     try {
       let notifyMsg = '';
@@ -1430,7 +1469,14 @@
       }
 
       dlg.submitting = false;
+      state.pendingEditorActions.delete(actionKey);
       if (!isSameActiveEditorDialog(dlg)) {
+        if (isReopenedSameActionDialog()) {
+          setEditorSubmitBusy(false, state.dialog.submitLabel);
+          if ($('#dialog-error').textContent === EDITOR_IN_FLIGHT_NOTICE) {
+            $('#dialog-error').textContent = '';
+          }
+        }
         if (notifyMsg) notify(notifyMsg);
         await refreshAllActiveData().catch(() => {});
         return;
@@ -1441,11 +1487,20 @@
       restoreTriggerFocus(null, fallbackFocusSelector);
     } catch (err) {
       dlg.submitting = false;
-      if (!isSameActiveEditorDialog(dlg)) {
+      state.pendingEditorActions.delete(actionKey);
+      if (isSameActiveEditorDialog(dlg)) {
+        setEditorSubmitBusy(false, submitLabel);
+        $('#dialog-error').textContent = err.message;
         return;
       }
-      setEditorSubmitBusy(false, submitLabel);
-      $('#dialog-error').textContent = err.message;
+      if (isReopenedSameActionDialog()) {
+        setEditorSubmitBusy(false, state.dialog.submitLabel);
+        $('#dialog-error').textContent = err.message;
+        return;
+      }
+      if (!hasOpenModalDialog()) {
+        showErrorBanner(err.message);
+      }
     }
   }
 
@@ -1473,7 +1528,9 @@
   function openDeleteCategoryDialog(categoryId, triggerEl) {
     const cat = findCategoryById(categoryId);
     if (!cat) return;
+    cancelPendingPurgePreview();
     showErrorBanner('');
+    const priorPending = state.pendingDeleteCategoryIds.has(cat.id);
     const token = ++state.deleteCatDialogSeq;
     state.deleteCatContext = {
       token,
@@ -1483,10 +1540,12 @@
       triggerSelector: buildFocusSelector(triggerEl),
       submitting: false,
     };
-    $('#delete-cat-error').textContent = '';
+    $('#delete-cat-error').textContent = priorPending
+      ? 'このカテゴリの削除を処理中です。完了までお待ちください。'
+      : '';
     $('#delete-cat-message').textContent =
       `カテゴリ #${cat.id}「${cat.name}」を削除します。配下にスレッドがある場合は拒否されます。`;
-    setDeleteCatSubmitBusy(false);
+    setDeleteCatSubmitBusy(priorPending);
     const dialog = $('#delete-category-dialog');
     if (dialog && typeof dialog.showModal === 'function') {
       if (!dialog.open) dialog.showModal();
@@ -1509,16 +1568,34 @@
     ev.preventDefault();
     const ctx = state.deleteCatContext;
     if (!ctx || ctx.submitting) return;
+    if (state.pendingDeleteCategoryIds.has(ctx.categoryId)) {
+      setDeleteCatSubmitBusy(true);
+      $('#delete-cat-error').textContent = 'このカテゴリの削除を処理中です。完了までお待ちください。';
+      return;
+    }
     ctx.submitting = true;
+    state.pendingDeleteCategoryIds.add(ctx.categoryId);
     setDeleteCatSubmitBusy(true);
     $('#delete-cat-error').textContent = '';
+
+    const isReopenedSameCategoryDialog = () => Boolean(
+      state.deleteCatContext &&
+      state.deleteCatContext.token !== ctx.token &&
+      state.deleteCatContext.categoryId === ctx.categoryId &&
+      $('#delete-category-dialog')?.open
+    );
+
     try {
       const res = await apiRequest(`./api/admin/categories/${ctx.categoryId}`, {
         method: 'DELETE',
         body: {},
       });
       ctx.submitting = false;
+      state.pendingDeleteCategoryIds.delete(ctx.categoryId);
       if (!isSameActiveDeleteCatDialog(ctx)) {
+        if (isReopenedSameCategoryDialog()) {
+          closeDeleteCategoryDialog({ restoreFocus: true });
+        }
         notify(`カテゴリ「${res.deletedCategory.name}」を削除しました。`);
         await refreshAllActiveData().catch(() => {});
         return;
@@ -1529,11 +1606,15 @@
       restoreTriggerFocus(null, '#open-new-category-btn');
     } catch (err) {
       ctx.submitting = false;
-      if (!isSameActiveDeleteCatDialog(ctx)) {
+      state.pendingDeleteCategoryIds.delete(ctx.categoryId);
+      if (isSameActiveDeleteCatDialog(ctx) || isReopenedSameCategoryDialog()) {
+        setDeleteCatSubmitBusy(false);
+        $('#delete-cat-error').textContent = err.message;
         return;
       }
-      setDeleteCatSubmitBusy(false);
-      $('#delete-cat-error').textContent = err.message;
+      if (!hasOpenModalDialog()) {
+        showErrorBanner(err.message);
+      }
     }
   }
 
@@ -1555,11 +1636,8 @@
 
   async function openPurgeThreadDialog(threadId, triggerEl) {
     showErrorBanner('');
-    if (state.purgePreviewAbortCtrl) {
-      state.purgePreviewAbortCtrl.abort();
-      state.purgePreviewAbortCtrl = null;
-    }
-    const reqSeq = ++state.purgePreviewSeq;
+    cancelPendingPurgePreview();
+    const reqSeq = state.purgePreviewSeq;
     const ctrl = new AbortController();
     state.purgePreviewAbortCtrl = ctrl;
 
@@ -1567,13 +1645,15 @@
       const preview = await apiRequest(`./api/admin/threads/${threadId}/delete-preview`, {
         signal: ctrl.signal,
       });
-      if (reqSeq !== state.purgePreviewSeq || ctrl.signal.aborted) {
+      if (reqSeq !== state.purgePreviewSeq || ctrl.signal.aborted || hasOpenModalDialog()) {
         return;
       }
+      const targetTid = Number(preview.thread.id);
+      const priorPending = state.pendingPurgeThreadIds.has(targetTid);
       const token = ++state.purgeDialogSeq;
       state.purgeContext = {
         token,
-        threadId: Number(preview.thread.id),
+        threadId: targetTid,
         title: preview.thread.title,
         expectedPostCount: Number(preview.postsCount),
         triggerEl,
@@ -1583,8 +1663,10 @@
       $('#purge-target-title').textContent = `#${preview.thread.id}「${preview.thread.title}」`;
       $('#purge-target-count').textContent = `${preview.postsCount} 件`;
       $('#purge-confirm-input').value = '';
-      $('#purge-dialog-error').textContent = '';
-      setPurgeSubmitBusy(false);
+      $('#purge-dialog-error').textContent = priorPending
+        ? 'このスレッドの削除を処理中です。完了までお待ちください。'
+        : '';
+      setPurgeSubmitBusy(priorPending);
       const dialog = $('#purge-thread-dialog');
       if (dialog && typeof dialog.showModal === 'function') {
         if (!dialog.open) dialog.showModal();
@@ -1603,11 +1685,7 @@
   }
 
   function closePurgeThreadDialog({ restoreFocus = true } = {}) {
-    state.purgePreviewSeq += 1;
-    if (state.purgePreviewAbortCtrl) {
-      state.purgePreviewAbortCtrl.abort();
-      state.purgePreviewAbortCtrl = null;
-    }
+    cancelPendingPurgePreview();
     const dialog = $('#purge-thread-dialog');
     const ctx = state.purgeContext;
     state.purgeContext = null;
@@ -1622,13 +1700,26 @@
     ev.preventDefault();
     const ctx = state.purgeContext;
     if (!ctx || ctx.submitting) return;
+    if (state.pendingPurgeThreadIds.has(ctx.threadId)) {
+      setPurgeSubmitBusy(true);
+      $('#purge-dialog-error').textContent = 'このスレッドの削除を処理中です。完了までお待ちください。';
+      return;
+    }
     const confirmTitle = $('#purge-confirm-input').value;
     const targetThreadId = ctx.threadId;
     const expectedPostCount = ctx.expectedPostCount;
     $('#purge-dialog-error').textContent = '';
 
     ctx.submitting = true;
+    state.pendingPurgeThreadIds.add(targetThreadId);
     setPurgeSubmitBusy(true);
+
+    const isReopenedSameThreadDialog = () => Boolean(
+      state.purgeContext &&
+      state.purgeContext.token !== ctx.token &&
+      state.purgeContext.threadId === targetThreadId &&
+      $('#purge-thread-dialog')?.open
+    );
 
     try {
       const res = await apiRequest(`./api/admin/threads/${targetThreadId}`, {
@@ -1639,7 +1730,11 @@
         },
       });
       ctx.submitting = false;
+      state.pendingPurgeThreadIds.delete(targetThreadId);
       if (!isSameActivePurgeDialog(ctx)) {
+        if (isReopenedSameThreadDialog()) {
+          closePurgeThreadDialog({ restoreFocus: true });
+        }
         notify(`スレッド「${res.deletedThread.title}」と投稿 ${res.deletedPostsCount} 件を削除しました。`);
         await refreshAllActiveData().catch(() => {});
         return;
@@ -1650,7 +1745,9 @@
       restoreTriggerFocus(null, '#main');
     } catch (err) {
       ctx.submitting = false;
-      if (!isSameActivePurgeDialog(ctx)) {
+      state.pendingPurgeThreadIds.delete(targetThreadId);
+      const reopenedSame = isReopenedSameThreadDialog();
+      if (!isSameActivePurgeDialog(ctx) && !reopenedSame) {
         return;
       }
       setPurgeSubmitBusy(false);
@@ -1659,7 +1756,7 @@
         err.details &&
         Number.isSafeInteger(err.details.actualPostsCount)
       ) {
-        ctx.expectedPostCount = err.details.actualPostsCount;
+        state.purgeContext.expectedPostCount = err.details.actualPostsCount;
         $('#purge-target-count').textContent = `${err.details.actualPostsCount} 件（最新に更新済み）`;
       }
       $('#purge-dialog-error').textContent = err.message;
