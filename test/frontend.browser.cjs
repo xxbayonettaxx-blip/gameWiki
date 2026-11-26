@@ -1363,19 +1363,23 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       );
     };
     const pressKey = async (key, code, keyCode) => {
-      await send('Input.dispatchKeyEvent', {
-        type: 'keyDown',
+      const keyParams = {
         key,
         code,
         windowsVirtualKeyCode: keyCode,
         nativeVirtualKeyCode: keyCode,
+      };
+      if (key === 'Enter') {
+        keyParams.text = '\r';
+        keyParams.unmodifiedText = '\r';
+      }
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        ...keyParams,
       });
       await send('Input.dispatchKeyEvent', {
         type: 'keyUp',
-        key,
-        code,
-        windowsVirtualKeyCode: keyCode,
-        nativeVirtualKeyCode: keyCode,
+        ...keyParams,
       });
     };
 
@@ -1933,6 +1937,294 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     const auditBodyText = await evaluate("document.querySelector('#audit-list').textContent");
     assert.ok(auditBodyText.includes('category_create'));
     assert.ok(auditBodyText.includes('post_soft_delete'));
+  });
+
+  await t.test('昇格前レビュー回帰(F1/F2): 物理削除の世代識別・プレビュー順序保護・フォーム二重送信抑止とエラー後再送', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+    const pressKey = async (key, code, keyCode) => {
+      const keyParams = {
+        key,
+        code,
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+      };
+      if (key === 'Enter') {
+        keyParams.text = '\r';
+        keyParams.unmodifiedText = '\r';
+      }
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        ...keyParams,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        ...keyParams,
+      });
+    };
+
+    const catF = db.createCategory({ name: 'F1F2回帰カテゴリ' });
+    const thA = db.createThread({ categoryId: catF.id, title: '削除対象A' });
+    const thB = db.createThread({ categoryId: catF.id, title: '削除対象B' });
+    db.createPost({
+      threadId: thA.id,
+      authorName: 'F1確認者',
+      visitorId: 'f1_check',
+      content: '削除対象Aの1件目投稿',
+    });
+
+    await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: url + 'admin.html' });
+    await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+    const catExpanded = await evaluate(`document.querySelector('#cat-${catF.id}')?.hidden === false`);
+    if (!catExpanded) {
+      await click(`[data-action="expand"][data-category-id="${catF.id}"]`);
+      await waitFor(`document.querySelector('#cat-${catF.id}')?.hidden === false`);
+    }
+
+    try {
+      // F1-a: プレビュー取得の逆転（Aを保留しAbort無視 → Bを開いて表示 → A遅延完了してもBが壊れないこと）
+      await evaluate(`(() => {
+        window.__f1OrigFetch = window.fetch;
+        let releasePreviewA = null;
+        window.__releasePreviewA = () => releasePreviewA?.();
+        window.fetch = (input, init) => {
+          const u = String(input);
+          if (u.includes('/api/admin/threads/${thA.id}/delete-preview')) {
+            return window.__f1OrigFetch(input, { ...init, signal: undefined }).then(
+              (resp) => new Promise((resolve) => { releasePreviewA = () => resolve(resp); })
+            );
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click(`[data-action="purge-thread"][data-thread-id="${thA.id}"]`);
+      await delay(20);
+      await click(`[data-action="purge-thread"][data-thread-id="${thB.id}"]`);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === true && document.querySelector('#purge-target-title')?.textContent.includes('削除対象B')");
+      assert.ok((await evaluate("document.querySelector('#purge-target-count').textContent")).includes('0 件'));
+      await evaluate('window.__releasePreviewA()');
+      await delay(80);
+      assert.equal(await evaluate("document.querySelector('#purge-thread-dialog').open"), true);
+      assert.ok((await evaluate("document.querySelector('#purge-target-title').textContent")).includes('削除対象B'));
+      assert.ok((await evaluate("document.querySelector('#purge-target-count').textContent")).includes('0 件'));
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === false");
+      await evaluate('window.fetch = window.__f1OrigFetch; delete window.__releasePreviewA;');
+
+      // F1-b: Aの削除送信中 → Escで閉じてB(0件)を開く → Aへ409応答が返ってもBの対象/件数/入力/エラー欄が一切汚染されないこと
+      await evaluate(`(() => {
+        let releaseA409 = null;
+        window.__releaseA409 = () => releaseA409?.();
+        window.fetch = (input, init) => {
+          const u = String(input);
+          const m = (init?.method || 'GET').toUpperCase();
+          if (m === 'DELETE' && u.endsWith('/api/admin/threads/${thA.id}')) {
+            return new Promise((resolve) => {
+              releaseA409 = () => resolve(new Response(JSON.stringify({
+                error: '削除前確認以降に投稿数が変化しました (1 -> 7 件)。',
+                code: 'THREAD_POST_COUNT_CHANGED',
+                details: { actualPostsCount: 7 },
+              }), { status: 409, headers: { 'Content-Type': 'application/json' } }));
+            });
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click(`[data-action="purge-thread"][data-thread-id="${thA.id}"]`);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === true && document.querySelector('#purge-target-title')?.textContent.includes('削除対象A')");
+      await setField('#purge-confirm-input', '削除対象A');
+      await evaluate("document.querySelector('#purge-thread-form').requestSubmit()");
+      assert.equal(await evaluate("document.querySelector('#purge-confirm-btn').disabled"), true);
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === false");
+      await click(`[data-action="purge-thread"][data-thread-id="${thB.id}"]`);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === true && document.querySelector('#purge-target-title')?.textContent.includes('削除対象B')");
+      await setField('#purge-confirm-input', 'B確認入力中');
+      await evaluate('window.__releaseA409()');
+      await delay(80);
+      const bAfter409 = await evaluate(`({
+        open: document.querySelector('#purge-thread-dialog').open,
+        title: document.querySelector('#purge-target-title').textContent,
+        count: document.querySelector('#purge-target-count').textContent,
+        inputVal: document.querySelector('#purge-confirm-input').value,
+        errText: document.querySelector('#purge-dialog-error').textContent,
+        btnDisabled: document.querySelector('#purge-confirm-btn').disabled,
+      })`);
+      assert.equal(bAfter409.open, true);
+      assert.ok(bAfter409.title.includes('削除対象B'), JSON.stringify(bAfter409));
+      assert.ok(bAfter409.count.includes('0 件'), JSON.stringify(bAfter409));
+      assert.equal(bAfter409.inputVal, 'B確認入力中');
+      assert.equal(bAfter409.errText, '');
+      assert.equal(bAfter409.btnDisabled, false);
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === false");
+      await evaluate('window.fetch = window.__f1OrigFetch; delete window.__releaseA409;');
+
+      // F1-c: Aの削除送信中 → Escで閉じてBを開く → Aへ実200削除成功が返ってもBを閉じず保持したままB自体の削除は通常どおり完了すること
+      await evaluate(`(() => {
+        let releaseA200 = null;
+        window.__releaseA200 = () => releaseA200?.();
+        window.fetch = (input, init) => {
+          const u = String(input);
+          const m = (init?.method || 'GET').toUpperCase();
+          if (m === 'DELETE' && u.endsWith('/api/admin/threads/${thA.id}')) {
+            return window.__f1OrigFetch(input, init).then(
+              (resp) => new Promise((resolve) => { releaseA200 = () => resolve(resp); })
+            );
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click(`[data-action="purge-thread"][data-thread-id="${thA.id}"]`);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === true && document.querySelector('#purge-target-title')?.textContent.includes('削除対象A')");
+      await setField('#purge-confirm-input', '削除対象A');
+      await evaluate("document.querySelector('#purge-thread-form').requestSubmit()");
+      assert.equal(await evaluate("document.querySelector('#purge-confirm-btn').disabled"), true);
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === false");
+      await click(`[data-action="purge-thread"][data-thread-id="${thB.id}"]`);
+      await waitFor("document.querySelector('#purge-thread-dialog').open === true && document.querySelector('#purge-target-title')?.textContent.includes('削除対象B')");
+      await setField('#purge-confirm-input', '削除対象B');
+      await evaluate('window.__releaseA200()');
+      await delay(120);
+      const bAfter200 = await evaluate(`({
+        open: document.querySelector('#purge-thread-dialog').open,
+        title: document.querySelector('#purge-target-title').textContent,
+        count: document.querySelector('#purge-target-count').textContent,
+        inputVal: document.querySelector('#purge-confirm-input').value,
+        btnDisabled: document.querySelector('#purge-confirm-btn').disabled,
+      })`);
+      assert.equal(bAfter200.open, true);
+      assert.ok(bAfter200.title.includes('削除対象B'));
+      assert.ok(bAfter200.count.includes('0 件'));
+      assert.equal(bAfter200.inputVal, '削除対象B');
+      assert.equal(bAfter200.btnDisabled, false);
+      assert.equal(db.getThreadDetail(thA.id), null);
+      assert.ok(db.getThreadDetail(thB.id));
+      // 開いたままのBをそのまま正常削除できること
+      await evaluate("document.querySelector('#purge-thread-form').requestSubmit()");
+      await waitFor("document.querySelector('#purge-thread-dialog').open === false");
+      assert.equal(db.getThreadDetail(thB.id), null);
+      await evaluate('window.fetch = window.__f1OrigFetch; delete window.__releaseA200;');
+
+      // F2-a: スレッド作成フォーム保存ボタン連打・連続requestSubmitでもHTTP送信・DB行・監査行が各1件だけ作成されること
+      await evaluate(`(() => {
+        window.__f2PostCount = 0;
+        let releaseCreate = null;
+        window.__releaseCreateThread = () => releaseCreate?.();
+        window.fetch = (input, init) => {
+          const u = String(input);
+          const m = (init?.method || 'GET').toUpperCase();
+          if (m === 'POST' && u.endsWith('/api/admin/threads')) {
+            window.__f2PostCount += 1;
+            return window.__f1OrigFetch(input, init).then(
+              (resp) => new Promise((resolve) => { releaseCreate = () => resolve(resp); })
+            );
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2連打検証スレ');
+      const flightClickState = await evaluate(`(() => {
+        const btn = document.querySelector('#dialog-submit');
+        const form = document.querySelector('#editor-form');
+        btn.click();
+        btn.click();
+        form.requestSubmit();
+        return { disabled: btn.disabled, postCount: window.__f2PostCount };
+      })()`);
+      assert.equal(flightClickState.disabled, true);
+      assert.equal(flightClickState.postCount, 1);
+      await evaluate('window.__releaseCreateThread()');
+      await waitFor("document.querySelector('#editor').open === false");
+      assert.equal(await evaluate('window.__f2PostCount'), 1);
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2連打検証スレ').length,
+        1
+      );
+      assert.equal(
+        db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2連打検証スレ').length,
+        1
+      );
+
+      // F2-b: タイトル入力欄でのEnter連続送信でも1件のみ作成されること
+      await evaluate('window.__f2PostCount = 0;');
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2Enter連打スレ');
+      await evaluate("document.querySelector('#dialog-thread-title').focus()");
+      await pressKey('Enter', 'Enter', 13);
+      await pressKey('Enter', 'Enter', 13);
+      assert.equal(await evaluate("document.querySelector('#dialog-submit').disabled"), true);
+      assert.equal(await evaluate('window.__f2PostCount'), 1);
+      await evaluate('window.__releaseCreateThread()');
+      await waitFor("document.querySelector('#editor').open === false");
+      assert.equal(await evaluate('window.__f2PostCount'), 1);
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2Enter連打スレ').length,
+        1
+      );
+      assert.equal(
+        db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2Enter連打スレ').length,
+        1
+      );
+
+      // F2-c: サーバー側バリデーションエラー時はボタンが再有効化され、修正後に再送・保存できること
+      await evaluate('window.fetch = window.__f1OrigFetch;');
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', '   ');
+      await evaluate("document.querySelector('#editor-form').requestSubmit()");
+      await waitFor("document.querySelector('#dialog-error')?.textContent.trim().length > 0");
+      assert.equal(await evaluate("document.querySelector('#editor').open"), true);
+      assert.equal(await evaluate("document.querySelector('#dialog-submit').disabled"), false);
+      assert.equal(await evaluate("document.querySelector('#dialog-submit').textContent"), '保存');
+
+      await setField('#dialog-thread-title', 'F2エラー復帰スレ');
+      await evaluate("document.querySelector('#editor-form').requestSubmit()");
+      await waitFor("document.querySelector('#editor').open === false");
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2エラー復帰スレ').length,
+        1
+      );
+      assert.equal(
+        db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2エラー復帰スレ').length,
+        1
+      );
+    } finally {
+      await evaluate(`
+        if (window.__f1OrigFetch) { window.fetch = window.__f1OrigFetch; }
+        delete window.__f1OrigFetch;
+        delete window.__releasePreviewA;
+        delete window.__releaseA409;
+        delete window.__releaseA200;
+        delete window.__releaseCreateThread;
+        delete window.__f2PostCount;
+      `).catch(() => {});
+      const cleanupCat = db.listCategoriesWithThreads().find((c) => c.id === catF.id);
+      if (cleanupCat) {
+        for (const th of cleanupCat.threads) {
+          db.purgeThread(th.id, {
+            confirmTitle: th.title,
+            expectedPostCount: th.post_count ?? 0,
+            audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
+          });
+        }
+        db.deleteCategory(catF.id, {
+          audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
+        });
+      }
+    }
   });
 
   if (process.env.FRONTEND_ARTIFACT_DIR) {
