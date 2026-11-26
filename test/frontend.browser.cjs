@@ -1858,13 +1858,15 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await evaluate(`(() => {
       window.__adminRaceOrigFetch = window.fetch;
       let releaseA = null;
-      window.__releaseAdminRaceA = () => releaseA?.();
+      const racePromise = new Promise((resolve) => { releaseA = resolve; });
+      window.__releaseAdminRaceA = () => releaseA();
       window.fetch = (input, init) => {
         const u = String(input);
         if (u.includes('/api/admin/threads/1/posts')) {
-          return window.__adminRaceOrigFetch(input, { ...init, signal: undefined }).then(
-            (resp) => new Promise((resolve) => { releaseA = () => resolve(resp); })
-          );
+          return window.__adminRaceOrigFetch(input, { ...init, signal: undefined }).then(async (resp) => {
+            await racePromise;
+            return resp;
+          });
         }
         return window.__adminRaceOrigFetch(input, init);
       };
@@ -1991,13 +1993,15 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       await evaluate(`(() => {
         window.__f1OrigFetch = window.fetch;
         let releasePreviewA = null;
-        window.__releasePreviewA = () => releasePreviewA?.();
+        const previewAPromise = new Promise((resolve) => { releasePreviewA = resolve; });
+        window.__releasePreviewA = () => releasePreviewA();
         window.fetch = (input, init) => {
           const u = String(input);
           if (u.includes('/api/admin/threads/${thA.id}/delete-preview')) {
-            return window.__f1OrigFetch(input, { ...init, signal: undefined }).then(
-              (resp) => new Promise((resolve) => { releasePreviewA = () => resolve(resp); })
-            );
+            return window.__f1OrigFetch(input, { ...init, signal: undefined }).then(async (resp) => {
+              await previewAPromise;
+              return resp;
+            });
           }
           return window.__f1OrigFetch(input, init);
         };
@@ -2019,13 +2023,15 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       // F1-d: 削除プレビュー取得中に編集ダイアログ(#editor)を開いて入力した後にプレビューが遅延到着しても、#purge-thread-dialogが開かず編集画面・フォーカスが維持されること
       await evaluate(`(() => {
         let releasePreviewOverlap = null;
-        window.__releasePreviewOverlap = () => releasePreviewOverlap?.();
+        const overlapPromise = new Promise((resolve) => { releasePreviewOverlap = resolve; });
+        window.__releasePreviewOverlap = () => releasePreviewOverlap();
         window.fetch = (input, init) => {
           const u = String(input);
           if (u.includes('/api/admin/threads/${thA.id}/delete-preview')) {
-            return window.__f1OrigFetch(input, { ...init, signal: undefined }).then(
-              (resp) => new Promise((resolve) => { releasePreviewOverlap = () => resolve(resp); })
-            );
+            return window.__f1OrigFetch(input, { ...init, signal: undefined }).then(async (resp) => {
+              await overlapPromise;
+              return resp;
+            });
           }
           return window.__f1OrigFetch(input, init);
         };
@@ -2104,14 +2110,16 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       // F1-c: Aの削除送信中 → Escで閉じてBを開く → Aへ実200削除成功が返ってもBを閉じず保持したままB自体の削除は通常どおり完了すること
       await evaluate(`(() => {
         let releaseA200 = null;
-        window.__releaseA200 = () => releaseA200?.();
+        const a200Promise = new Promise((resolve) => { releaseA200 = resolve; });
+        window.__releaseA200 = () => releaseA200();
         window.fetch = (input, init) => {
           const u = String(input);
           const m = (init?.method || 'GET').toUpperCase();
           if (m === 'DELETE' && u.endsWith('/api/admin/threads/${thA.id}')) {
-            return window.__f1OrigFetch(input, init).then(
-              (resp) => new Promise((resolve) => { releaseA200 = () => resolve(resp); })
-            );
+            return window.__f1OrigFetch(input, init).then(async (resp) => {
+              await a200Promise;
+              return resp;
+            });
           }
           return window.__f1OrigFetch(input, init);
         };
@@ -2151,16 +2159,25 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       // F2-a: スレッド作成フォーム保存ボタン連打・連続requestSubmitでもHTTP送信・DB行・監査行が各1件だけ作成されること
       await evaluate(`(() => {
         window.__f2PostCount = 0;
-        let releaseCreate = null;
-        window.__releaseCreateThread = () => releaseCreate?.();
+        let curGate = null;
+        const resetGate = () => {
+          let r = null;
+          const p = new Promise((resolve) => { r = resolve; });
+          curGate = { p, r };
+        };
+        resetGate();
+        window.__resetCreateGate = resetGate;
+        window.__releaseCreateThread = () => curGate.r();
         window.fetch = (input, init) => {
           const u = String(input);
           const m = (init?.method || 'GET').toUpperCase();
           if (m === 'POST' && u.endsWith('/api/admin/threads')) {
             window.__f2PostCount += 1;
-            return window.__f1OrigFetch(input, init).then(
-              (resp) => new Promise((resolve) => { releaseCreate = () => resolve(resp); })
-            );
+            const g = curGate;
+            return window.__f1OrigFetch(input, init).then(async (resp) => {
+              await g.p;
+              return resp;
+            });
           }
           return window.__f1OrigFetch(input, init);
         };
@@ -2192,7 +2209,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       );
 
       // F2-b: タイトル入力欄でのEnter連続送信でも1件のみ作成されること
-      await evaluate('window.__f2PostCount = 0;');
+      await evaluate('window.__f2PostCount = 0; window.__resetCreateGate();');
       await click('#open-new-thread-btn');
       await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
       await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
@@ -2242,15 +2259,17 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       await evaluate(`(() => {
         window.__f2PostCount = 0;
         let releaseCreateReopen = null;
-        window.__releaseCreateReopen = () => releaseCreateReopen?.();
+        const reopenPromise = new Promise((resolve) => { releaseCreateReopen = resolve; });
+        window.__releaseCreateReopen = () => releaseCreateReopen();
         window.fetch = (input, init) => {
           const u = String(input);
           const m = (init?.method || 'GET').toUpperCase();
           if (m === 'POST' && u.endsWith('/api/admin/threads')) {
             window.__f2PostCount += 1;
-            return window.__f1OrigFetch(input, init).then(
-              (resp) => new Promise((resolve) => { releaseCreateReopen = () => resolve(resp); })
-            );
+            return window.__f1OrigFetch(input, init).then(async (resp) => {
+              await reopenPromise;
+              return resp;
+            });
           }
           return window.__f1OrigFetch(input, init);
         };
@@ -2353,9 +2372,14 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         window.__f2PostBCount = 0;
         window.__overviewHeld = false;
         let failOverviewA = null;
+        const overviewGatePromise = new Promise((_, reject) => {
+          failOverviewA = () => reject(new Error('ネットワーク一時断テスト'));
+        });
+        overviewGatePromise.catch(() => {});
         let releaseCreateB = null;
-        window.__failOverviewA = () => failOverviewA?.();
-        window.__releaseCreateB = () => releaseCreateB?.();
+        const createBPromise = new Promise((resolve) => { releaseCreateB = resolve; });
+        window.__failOverviewA = () => failOverviewA();
+        window.__releaseCreateB = () => releaseCreateB();
         window.__allowOverviewNormal = false;
         window.fetch = (input, init) => {
           const u = String(input);
@@ -2366,15 +2390,14 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
               return window.__f1OrigFetch(input, init);
             }
             window.__f2PostBCount += 1;
-            return window.__f1OrigFetch(input, init).then(
-              (resp) => new Promise((resolve) => { releaseCreateB = () => resolve(resp); })
-            );
+            return window.__f1OrigFetch(input, init).then(async (resp) => {
+              await createBPromise;
+              return resp;
+            });
           }
           if (m === 'GET' && u.endsWith('/api/admin/overview') && !window.__allowOverviewNormal && window.__f2PostACount >= 1 && !window.__overviewHeld) {
             window.__overviewHeld = true;
-            return new Promise((_, reject) => {
-              failOverviewA = () => reject(new Error('ネットワーク一時断テスト'));
-            });
+            return overviewGatePromise;
           }
           return window.__f1OrigFetch(input, init);
         };
@@ -2481,6 +2504,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         delete window.__releasePreviewOverlap;
         delete window.__releaseA409;
         delete window.__releaseA200;
+        delete window.__resetCreateGate;
         delete window.__releaseCreateThread;
         delete window.__releaseCreateReopen;
         delete window.__releaseCreateFail500;
