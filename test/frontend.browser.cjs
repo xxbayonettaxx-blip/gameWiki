@@ -1503,30 +1503,153 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await waitFor("!document.querySelector('#admin-workspace')?.hidden");
     assert.ok((await evaluate("document.querySelector('#admin-operator-badge').textContent")).includes('race_reg_user'));
 
-    // 3b. 新管理画面レイアウト（KPI4カード・検索フィルタ・最近の操作・1280/320px非はみ出し・表示設定同期）
+    // 3b. 新管理画面レイアウト（KPI4カード・検索フィルタ・最近の操作・UI改善3項目・5テーマ高コントラスト・1280/320px非はみ出し・表示設定同期）
     const layoutMetrics = await evaluate(`(() => ({
       statsCount: document.querySelectorAll('.stats .stat').length,
       navCount: document.querySelectorAll('#navigation .nav-btn').length,
+      catBtnCount: document.querySelectorAll('#open-new-category-btn').length,
       recentExists: Boolean(document.querySelector('#recent-audit-list')),
       clientW: document.documentElement.clientWidth,
       scrollW: document.documentElement.scrollWidth,
     }))()`);
     assert.equal(layoutMetrics.statsCount, 4);
     assert.equal(layoutMetrics.navCount, 5);
+    assert.equal(layoutMetrics.catBtnCount, 1);
     assert.equal(layoutMetrics.recentExists, true);
     assert.ok(layoutMetrics.scrollW <= layoutMetrics.clientW, JSON.stringify(layoutMetrics));
+
+    // UI改善3項目 (デスクトップ 1280px 概要・カテゴリ管理の両ページでボタン配置と階層インデントを確認)
+    for (const pageKey of ['overview', 'structure']) {
+      await click(`#nav-btn-${pageKey}`);
+      await waitFor(`document.querySelector('#nav-btn-${pageKey}')?.getAttribute('aria-current') === 'page'`);
+      const uiMetrics = await evaluate(`(() => {
+        const catBtn = document.querySelector('#open-new-category-btn').getBoundingClientRect();
+        const thBtn = document.querySelector('#open-new-thread-btn').getBoundingClientRect();
+        const openBody = [...document.querySelectorAll('#structure-list .category-body')]
+          .find((b) => !b.hidden && b.querySelector('.thread-row .thread-name'));
+        const catIcon = openBody?.closest('.category')?.querySelector('.category-head .icon')?.getBoundingClientRect();
+        const thName = openBody?.querySelector('.thread-row .thread-name')?.getBoundingClientRect();
+        return {
+          catBtnCount: document.querySelectorAll('#open-new-category-btn').length,
+          catRight: catBtn.right,
+          thLeft: thBtn.left,
+          sameRowDiff: Math.abs(catBtn.top - thBtn.top),
+          indentPx: thName && catIcon ? thName.left - catIcon.left : -1,
+        };
+      })()`);
+      assert.equal(uiMetrics.catBtnCount, 1);
+      assert.ok(uiMetrics.catRight <= uiMetrics.thLeft + 0.5, `${pageKey}: ${JSON.stringify(uiMetrics)}`);
+      assert.ok(uiMetrics.sameRowDiff < 8, `${pageKey}: ${JSON.stringify(uiMetrics)}`);
+      assert.ok(uiMetrics.indentPx >= 16, `${pageKey}: ${JSON.stringify(uiMetrics)}`);
+    }
+    await click('#nav-btn-overview');
+    await waitFor("document.querySelector('#nav-btn-overview')?.getAttribute('aria-current') === 'page'");
+
+    // UI改善3項目 (5テーマ高コントラスト・赤み判定・別色区別)
+    await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const adminThemeMetrics = await evaluate(`(() => {
+      function parseColor(raw) {
+        const m = String(raw || '').trim().match(/rgba?\\(\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+        if (!m) throw new Error('Unparseable color: ' + raw);
+        return [Number(m[1]), Number(m[2]), Number(m[3])];
+      }
+      function relLum([r, g, b]) {
+        const f = (c) => {
+          const v = c / 255;
+          return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+      }
+      function ratio(c1, c2) {
+        const l1 = relLum(parseColor(c1));
+        const l2 = relLum(parseColor(c2));
+        return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+      }
+      function isReddish(raw) {
+        const [r, g, b] = parseColor(raw);
+        return r > g && r > b;
+      }
+      const out = {};
+      for (const theme of ['light', 'dark', 'paper', 'ud-light', 'ud-dark']) {
+        document.documentElement.dataset.theme = theme;
+        const backCs = getComputedStyle(document.querySelector('.back-board-link'));
+        const prefsCs = getComputedStyle(document.querySelector('.sidebar-bottom [data-action="preferences"]'));
+        const catBtnCs = getComputedStyle(document.querySelector('#open-new-category-btn'));
+        const thBtnCs = getComputedStyle(document.querySelector('#open-new-thread-btn'));
+        out[theme] = {
+          backRatio: ratio(backCs.color, backCs.backgroundColor),
+          backRedBg: isReddish(backCs.backgroundColor),
+          backRedFg: isReddish(backCs.color),
+          backDistinctFromPrefs: backCs.backgroundColor !== prefsCs.backgroundColor,
+          catBtnRatio: ratio(catBtnCs.color, catBtnCs.backgroundColor),
+          catDistinctFromThread: catBtnCs.backgroundColor !== thBtnCs.backgroundColor,
+          catDistinctFromBack: catBtnCs.backgroundColor !== backCs.backgroundColor,
+        };
+      }
+      document.documentElement.dataset.theme = 'light';
+      return out;
+    })()`);
+    await send('Emulation.setEmulatedMedia', { features: [] });
+    for (const [theme, m] of Object.entries(adminThemeMetrics)) {
+      assert.ok(m.backRatio >= 7.0, `${theme} backRatio=${m.backRatio}`);
+      assert.equal(m.backRedBg, true, `${theme} backRedBg`);
+      assert.equal(m.backRedFg, true, `${theme} backRedFg`);
+      assert.equal(m.backDistinctFromPrefs, true, `${theme} backDistinctFromPrefs`);
+      assert.ok(m.catBtnRatio >= 4.5, `${theme} catBtnRatio=${m.catBtnRatio}`);
+      assert.equal(m.catDistinctFromThread, true, `${theme} catDistinctFromThread`);
+      assert.equal(m.catDistinctFromBack, true, `${theme} catDistinctFromBack`);
+    }
 
     await setField('#structure-search', '雑談');
     await waitFor("document.querySelector('#structure-count')?.textContent.includes('検索結果')");
     await setField('#structure-search', '');
     await waitFor("document.querySelector('#structure-count')?.textContent.includes('全 ')");
 
+    // 320px 狭幅（標準文字16 / 大文字18）での非はみ出し・モバイル戻るリンク赤み・子スレッドインデント検証
     await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 640, deviceScaleFactor: 1, mobile: true });
-    const adminMobile = await evaluate(`({
-      clientW: document.documentElement.clientWidth,
-      scrollW: document.documentElement.scrollWidth,
-    })`);
-    assert.ok(adminMobile.scrollW <= adminMobile.clientW, JSON.stringify(adminMobile));
+    for (const fontVal of ['16', '18']) {
+      await evaluate(`document.documentElement.dataset.font = ${JSON.stringify(fontVal)}`);
+      const adminMobile = await evaluate(`(() => {
+        function parseColor(raw) {
+          const m = String(raw || '').trim().match(/rgba?\\(\\s*(\\d+),\\s*(\\d+),\\s*(\\d+)/);
+          if (!m) throw new Error('Unparseable color: ' + raw);
+          return [Number(m[1]), Number(m[2]), Number(m[3])];
+        }
+        function relLum([r, g, b]) {
+          const f = (c) => {
+            const v = c / 255;
+            return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+          };
+          return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+        }
+        const mBackCs = getComputedStyle(document.querySelector('.mobile-back-link'));
+        const [r1, g1, b1] = parseColor(mBackCs.backgroundColor);
+        const [r2, g2, b2] = parseColor(mBackCs.color);
+        const l1 = relLum([r1, g1, b1]);
+        const l2 = relLum([r2, g2, b2]);
+        const openBody = [...document.querySelectorAll('#structure-list .category-body')]
+          .find((b) => !b.hidden && b.querySelector('.thread-row .thread-name'));
+        const catIcon = openBody?.closest('.category')?.querySelector('.category-head .icon')?.getBoundingClientRect();
+        const thName = openBody?.querySelector('.thread-row .thread-name')?.getBoundingClientRect();
+        return {
+          font: document.documentElement.dataset.font,
+          clientW: document.documentElement.clientWidth,
+          scrollW: document.documentElement.scrollWidth,
+          mobileBackVisible: mBackCs.display !== 'none',
+          mobileBackRedBg: r1 > g1 && r1 > b1,
+          mobileBackRedFg: r2 > g2 && r2 > b2,
+          mobileBackRatio: (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05),
+          indentPx: thName && catIcon ? thName.left - catIcon.left : -1,
+        };
+      })()`);
+      assert.ok(adminMobile.scrollW <= adminMobile.clientW, `font=${fontVal}: ${JSON.stringify(adminMobile)}`);
+      assert.equal(adminMobile.mobileBackVisible, true);
+      assert.equal(adminMobile.mobileBackRedBg, true);
+      assert.equal(adminMobile.mobileBackRedFg, true);
+      assert.ok(adminMobile.mobileBackRatio >= 7.0, `font=${fontVal}: ${JSON.stringify(adminMobile)}`);
+      assert.ok(adminMobile.indentPx >= 12, `font=${fontVal}: ${JSON.stringify(adminMobile)}`);
+    }
+    await evaluate("document.documentElement.dataset.theme = 'light'; document.documentElement.dataset.font = '16';");
     await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
 
     // 表示設定ダイアログ：他キー(sort)を壊さずテーマ・文字サイズを保存できること

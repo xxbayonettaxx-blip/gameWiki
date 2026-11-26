@@ -20,6 +20,9 @@
   --accent: #6154b4;
   --accent-hover: #5143a3;
   --accent-fg: #ffffff;
+  --cat-cta-bg: #1e6b58;
+  --cat-cta-hover: #165546;
+  --cat-cta-fg: #ffffff;
   --violet: #55439f;
   --violet-bg: #ece7fb;
   --blue: #345f91;
@@ -31,6 +34,7 @@
   --danger: #b4233c;
   --danger-bg: #fef2f2;
   --danger-ink: #8f1d32;
+  --back-bg: #fde7ea;
   --focus-ring: #51449f;
   --shadow: 0 2px 3px #27193d06;
 }
@@ -49,6 +53,9 @@
   --accent: #b8acf9;
   --accent-hover: #cbc2fb;
   --accent-fg: #201837;
+  --cat-cta-bg: #6ad3b2;
+  --cat-cta-hover: #83dfc1;
+  --cat-cta-fg: #11241e;
   --violet: #d3caff;
   --violet-bg: #3a3058;
   --blue: #a5d2ff;
@@ -60,6 +67,7 @@
   --danger: #ffacbc;
   --danger-bg: #3b1c24;
   --danger-ink: #ffd4dc;
+  --back-bg: #4a202b;
   --focus-ring: #d3caff;
   --shadow: none;
 }
@@ -78,6 +86,9 @@
   --accent: #78623e;
   --accent-hover: #624e2f;
   --accent-fg: #ffffff;
+  --cat-cta-bg: #245c4c;
+  --cat-cta-hover: #1b473b;
+  --cat-cta-fg: #ffffff;
   --violet: #5f4a2b;
   --violet-bg: #f1e7d4;
   --blue: #2f557f;
@@ -89,6 +100,7 @@
   --danger: #a62626;
   --danger-bg: #fdf2f2;
   --danger-ink: #8f1d1d;
+  --back-bg: #fae4e4;
   --focus-ring: #5f4a2b;
   --shadow: 0 2px 3px rgba(48, 47, 44, 0.06);
 }
@@ -107,6 +119,9 @@
   --accent: #0072b2;
   --accent-hover: #005a8d;
   --accent-fg: #ffffff;
+  --cat-cta-bg: #006b52;
+  --cat-cta-hover: #005440;
+  --cat-cta-fg: #ffffff;
   --violet: #005585;
   --violet-bg: #e6f2f8;
   --blue: #005585;
@@ -118,6 +133,7 @@
   --danger: #b91c1c;
   --danger-bg: #fef2f2;
   --danger-ink: #991b1b;
+  --back-bg: #fdecec;
   --focus-ring: #005585;
   --shadow: 0 2px 3px rgba(0, 0, 0, 0.05);
 }
@@ -136,6 +152,9 @@
   --accent: #56b4e9;
   --accent-hover: #7cc7f0;
   --accent-fg: #111827;
+  --cat-cta-bg: #6ee7b7;
+  --cat-cta-hover: #8ef0c8;
+  --cat-cta-fg: #0f241d;
   --violet: #8cd2f8;
   --violet-bg: #1e3545;
   --blue: #8cd2f8;
@@ -147,6 +166,7 @@
   --danger: #f87171;
   --danger-bg: #3b1c1c;
   --danger-ink: #fecaca;
+  --back-bg: #4c1d1d;
   --focus-ring: #8cd2f8;
   --shadow: none;
 }
@@ -320,11 +340,19 @@ a {
 }
 .mobile-back-link {
   display: none;
+  align-items: center;
   text-decoration: none;
   font-size: 12px;
   font-weight: 700;
-  color: var(--violet);
+  color: var(--danger-ink);
+  background: var(--back-bg);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
   white-space: nowrap;
+}
+.mobile-back-link:hover {
+  background: var(--danger);
+  color: var(--panel);
 }
 
 .nav-caption {
@@ -377,6 +405,17 @@ a {
   margin-top: auto;
   display: grid;
   gap: 8px;
+}
+
+/* 掲示板へ戻るリンク（表示設定や管理ナビと区別できる赤系トーン） */
+.presentation-link.back-board-link {
+  background: var(--back-bg);
+  color: var(--danger-ink);
+  border: 1px solid var(--danger);
+}
+.presentation-link.back-board-link:hover {
+  background: var(--danger);
+  color: var(--panel);
 }
 
 .demo-note {
@@ -557,6 +596,14 @@ main {
   color: var(--muted);
   margin: 0;
 }
+.page-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  max-width: 100%;
+}
 
 .btn {
   display: inline-flex;
@@ -582,6 +629,14 @@ main {
 }
 .primary:hover {
   background: var(--accent-hover);
+}
+/* カテゴリ追加CTA（新規スレッドの --accent と区別する高コントラスト別色） */
+.category-cta {
+  background: var(--cat-cta-bg);
+  color: var(--cat-cta-fg);
+}
+.category-cta:hover {
+  background: var(--cat-cta-hover);
 }
 .secondary {
   background: var(--panel);
@@ -818,14 +873,30 @@ textarea {
   color: var(--muted);
 }
 
+/* 展開された子スレッド一覧（親カテゴリから1段インデント＋左ガイド線で階層を明示） */
+.category-body {
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  padding-left: 18px;
+}
+.category-body .blank {
+  margin: 0;
+  padding: 13px 12px 13px 14px;
+  border-left: 2px solid var(--border);
+}
+
 .thread-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 7px;
-  padding: 7px 9px 7px 10px;
+  padding: 8px 10px 8px 14px;
   min-height: 45px;
   border-top: 1px solid var(--line);
+  border-left: 2px solid var(--border);
+}
+.category-body > .thread-row:first-child {
+  border-top: 0;
 }
 .thread-name {
   display: flex;
@@ -1146,8 +1217,12 @@ dialog::backdrop {
   .admin-table-wrap {
     padding-inline: 20px;
   }
+  .category-body {
+    padding-left: 20px;
+  }
   .thread-row {
-    padding-inline: 13px;
+    padding-left: 16px;
+    padding-right: 13px;
   }
   .activity {
     padding-inline: 20px;
@@ -1186,7 +1261,7 @@ dialog::backdrop {
   .mobile-back-link {
     display: inline-flex;
     margin-left: auto;
-    padding: 4px 6px;
+    padding: 5px 10px;
   }
   .brand-mark {
     width: 34px;
@@ -1232,6 +1307,9 @@ dialog::backdrop {
     margin-bottom: 17px;
     gap: 10px;
   }
+  .page-heading-actions {
+    flex-shrink: 1;
+  }
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
@@ -1262,9 +1340,13 @@ dialog::backdrop {
   .panel-footer {
     padding-inline: 11px;
   }
+  .category-body {
+    padding-left: 12px;
+  }
   .thread-row {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 6px;
+    padding: 8px 8px 8px 12px;
   }
   .thread-count {
     grid-column: 1 / 2;

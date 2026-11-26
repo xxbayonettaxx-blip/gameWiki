@@ -392,12 +392,17 @@
     if (crumb) crumb.textContent = activeMeta[2];
   }
 
-  function buildPageHeading(headingText, descriptionText, actionBtn = null) {
+  function buildPageHeading(headingText, descriptionText, actions = null) {
     const header = el('header', 'page-heading');
     const left = el('div');
     left.append(el('h1', '', headingText), el('p', '', descriptionText));
     header.append(left);
-    if (actionBtn) header.append(actionBtn);
+    const list = Array.isArray(actions) ? actions.filter(Boolean) : actions ? [actions] : [];
+    if (list.length > 0) {
+      const actionWrap = el('div', 'page-heading-actions');
+      actionWrap.append(...list);
+      header.append(actionWrap);
+    }
     return header;
   }
 
@@ -493,7 +498,7 @@
       headBar.append(headBtn, catActions);
       catCard.append(headBar);
 
-      const bodyWrap = el('div');
+      const bodyWrap = el('div', 'category-body');
       bodyWrap.id = `cat-${cat.id}`;
       bodyWrap.hidden = !expanded;
 
@@ -565,10 +570,7 @@
     const h2 = el('h2', '', 'カテゴリ・スレッド');
     h2.id = 'structure-title';
     headLeft.append(h2, el('p', '', 'カテゴリを開いて、スレッドの案内や表示順を編集できます。'));
-    head.append(
-      headLeft,
-      makeBtn('カテゴリ追加', 'new-category', 'plus', 'secondary', { id: 'open-new-category-btn' })
-    );
+    head.append(headLeft);
 
     const searchWrap = el('div', 'search-wrap');
     const searchInput = el('input');
@@ -907,6 +909,9 @@
     if (!pageRoot) return;
     pageRoot.replaceChildren();
 
+    const newCategoryBtn = makeBtn('カテゴリ追加', 'new-category', 'plus', 'category-cta', {
+      id: 'open-new-category-btn',
+    });
     const newThreadBtn = makeBtn('新規スレッド', 'new-thread', 'plus', 'primary', {
       id: 'open-new-thread-btn',
       disabled: state.categories.length === 0,
@@ -914,7 +919,7 @@
 
     if (state.page === 'structure') {
       pageRoot.append(
-        buildPageHeading('カテゴリ管理', '掲示板の構成とスレッド案内・表示順を編集します。', newThreadBtn),
+        buildPageHeading('カテゴリ管理', '掲示板の構成とスレッド案内・表示順を編集します。', [newCategoryBtn, newThreadBtn]),
         buildStructurePanel()
       );
       renderStructureRows();
@@ -939,7 +944,7 @@
       const cols = el('div', 'columns');
       cols.append(buildStructurePanel(), buildActivityPanel(false));
       pageRoot.append(
-        buildPageHeading('掲示板管理', '掲示板の構成と最近の管理操作を確認します。', newThreadBtn),
+        buildPageHeading('掲示板管理', '掲示板の構成と最近の管理操作を確認します。', [newCategoryBtn, newThreadBtn]),
         buildStatsGrid(),
         cols
       );
