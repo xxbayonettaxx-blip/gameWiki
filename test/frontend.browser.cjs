@@ -2346,6 +2346,133 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2開き直し失敗後再送スレ').length,
         1
       );
+
+      // F2-f: Codex再現経路 — 保存A成功後の一覧更新を保留 → 保存B送信→Esc→開き直し → Aの一覧更新失敗が起きてもBのロック/文言を壊さず重複作成を阻止すること
+      await evaluate(`(() => {
+        window.__f2PostACount = 0;
+        window.__f2PostBCount = 0;
+        window.__overviewHeld = false;
+        let failOverviewA = null;
+        let releaseCreateB = null;
+        window.__failOverviewA = () => failOverviewA?.();
+        window.__releaseCreateB = () => releaseCreateB?.();
+        window.__allowOverviewNormal = false;
+        window.fetch = (input, init) => {
+          const u = String(input);
+          const m = (init?.method || 'GET').toUpperCase();
+          if (m === 'POST' && u.endsWith('/api/admin/threads')) {
+            if (window.__f2PostACount === 0) {
+              window.__f2PostACount += 1;
+              return window.__f1OrigFetch(input, init);
+            }
+            window.__f2PostBCount += 1;
+            return window.__f1OrigFetch(input, init).then(
+              (resp) => new Promise((resolve) => { releaseCreateB = () => resolve(resp); })
+            );
+          }
+          if (m === 'GET' && u.endsWith('/api/admin/overview') && !window.__allowOverviewNormal && window.__f2PostACount >= 1 && !window.__overviewHeld) {
+            window.__overviewHeld = true;
+            return new Promise((_, reject) => {
+              failOverviewA = () => reject(new Error('ネットワーク一時断テスト'));
+            });
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2一覧更新失敗検証A');
+      await click('#dialog-submit');
+      await waitFor("document.querySelector('#editor').open === false && window.__overviewHeld === true");
+
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2一覧更新失敗検証B');
+      await click('#dialog-submit');
+      assert.equal(await evaluate('window.__f2PostBCount'), 1);
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#editor').open === false");
+
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      assert.equal(await evaluate("document.querySelector('#dialog-submit').disabled"), true);
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2一覧更新失敗検証B');
+
+      // Aの一覧更新失敗を発生させる → Bのロックと処理中表示が維持され、再送できないこと
+      await evaluate('window.__failOverviewA()');
+      await waitFor("document.querySelector('#admin-error-banner')?.hidden === false");
+      const bAfterAError = await evaluate(`({
+        editorOpen: document.querySelector('#editor').open,
+        submitDisabled: document.querySelector('#dialog-submit').disabled,
+        dialogErr: document.querySelector('#dialog-error').textContent,
+        bannerText: document.querySelector('#admin-error-banner').textContent,
+      })`);
+      assert.equal(bAfterAError.editorOpen, true);
+      assert.equal(bAfterAError.submitDisabled, true);
+      assert.ok(bAfterAError.dialogErr.includes('前回の送信を処理中です'), JSON.stringify(bAfterAError));
+      assert.ok(bAfterAError.bannerText.includes('再読込'), JSON.stringify(bAfterAError));
+
+      await evaluate(`(() => {
+        document.querySelector('#dialog-submit').click();
+        document.querySelector('#editor-form').requestSubmit();
+      })()`);
+      await evaluate("document.querySelector('#dialog-thread-title').focus()");
+      await pressKey('Enter', 'Enter', 13);
+      assert.equal(await evaluate('window.__f2PostBCount'), 1);
+
+      await evaluate('window.__allowOverviewNormal = true; window.__releaseCreateB();');
+      await waitFor("document.querySelector('#dialog-submit').disabled === false");
+      await delay(80);
+      assert.equal(await evaluate('window.__f2PostBCount'), 1);
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2一覧更新失敗検証A').length,
+        1
+      );
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2一覧更新失敗検証B').length,
+        1
+      );
+      assert.equal(
+        db.listAdminAuditLogs({ limit: 50 }).logs.filter((l) => l.action === 'thread_create' && l.detail?.title === 'F2一覧更新失敗検証B').length,
+        1
+      );
+      await pressKey('Escape', 'Escape', 27);
+      await waitFor("document.querySelector('#editor').open === false");
+
+      // F2-g: 単体保存後に一覧更新だけ失敗したとき、保存完了と再読込案内が出て「再読込」ボタンで復帰できること
+      await evaluate(`(() => {
+        let failedOnce = false;
+        window.fetch = (input, init) => {
+          const u = String(input);
+          const m = (init?.method || 'GET').toUpperCase();
+          if (m === 'GET' && u.endsWith('/api/admin/overview') && !failedOnce) {
+            failedOnce = true;
+            return Promise.resolve(new Response(JSON.stringify({ error: '一覧一時障害テスト' }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' },
+            }));
+          }
+          return window.__f1OrigFetch(input, init);
+        };
+      })()`);
+      await click('#open-new-thread-btn');
+      await waitFor("document.querySelector('#editor').open === true && Boolean(document.querySelector('#dialog-thread-title'))");
+      await evaluate(`document.querySelector('#dialog-thread-cat').value = ${JSON.stringify(String(catF.id))}`);
+      await setField('#dialog-thread-title', 'F2再読込案内検証スレ');
+      await click('#dialog-submit');
+      await waitFor("document.querySelector('#editor').open === false && document.querySelector('#admin-error-banner')?.hidden === false");
+      const reloadNotice = await evaluate("document.querySelector('#admin-error-banner').textContent");
+      assert.ok(reloadNotice.includes('再読込') && reloadNotice.includes('一覧一時障害テスト'), reloadNotice);
+      assert.equal(
+        db.listCategoriesWithThreads().find((c) => c.id === catF.id).threads.filter((th) => th.title === 'F2再読込案内検証スレ').length,
+        1
+      );
+      await evaluate('window.fetch = window.__f1OrigFetch;');
+      await click('#admin-reload-all');
+      await waitFor("document.querySelector('#admin-error-banner').hidden === true && document.querySelector('#structure-list')?.textContent.includes('F2再読込案内検証スレ')");
     } finally {
       await evaluate(`
         if (window.__f1OrigFetch) { window.fetch = window.__f1OrigFetch; }
@@ -2357,7 +2484,13 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         delete window.__releaseCreateThread;
         delete window.__releaseCreateReopen;
         delete window.__releaseCreateFail500;
+        delete window.__failOverviewA;
+        delete window.__releaseCreateB;
+        delete window.__allowOverviewNormal;
+        delete window.__overviewHeld;
         delete window.__f2PostCount;
+        delete window.__f2PostACount;
+        delete window.__f2PostBCount;
       `).catch(() => {});
       const cleanupCat = db.listCategoriesWithThreads().find((c) => c.id === catF.id);
       if (cleanupCat) {
