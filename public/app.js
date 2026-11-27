@@ -1634,11 +1634,12 @@
       $('#comment-body').focus();
     });
 
-    // 「↻ 更新」は直近で失敗したスレッド・表示中スレッドを再取得（初回読込失敗時はbootstrap再実行）
+    // 「↻ 更新」は対象スレッドと現在権限を再取得（初回読込失敗時はbootstrap再実行）
     $('#reload-thread').addEventListener('click', () => {
       const targetId = state.failedTargetThread ? state.failedTargetThread.id : state.activeThreadId;
       if (targetId !== null) {
         loadThread(targetId, { preserveFocusSelector: '#reload-thread' });
+        fetchCurrentUser();
       } else {
         loadInitialData();
       }
@@ -1674,8 +1675,24 @@
       state.pendingAuthChangedMessage = '';
     }
 
-    // 仮パスワード制限 / セッション期限切れ / アカウント切替時の案内アクション
+    // 仮パスワード制限 / 権限停止 / セッション期限切れ / アカウント切替時の案内アクション
     $('#composer-open-password-btn').addEventListener('click', () => openAuthSheet());
+    $('#composer-recheck-perm-btn')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await fetchCurrentUser();
+        if (canSubmitPost()) {
+          $('#form-error').textContent = '';
+          $('#submit-button')?.focus({ preventScroll: true });
+          notify('投稿権限を確認しました。送信できます。');
+        } else if (state.permissions?.create_post === false) {
+          notify('投稿制限が継続しています。');
+        }
+      } finally {
+        btn.disabled = false;
+      }
+    });
     $('#expired-relogin-btn').addEventListener('click', () => {
       openAuthSheet({ tab: 'login', reopenComposer: true });
     });
@@ -1746,6 +1763,15 @@
       }
     }
 
+    const NET_ERR_RETRY = '通信エラーが発生しました。時間をおいて再試行してください。';
+    const postAuthJson = (path, payload) =>
+      fetch(path, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
     $('#login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       if (state.isAuthSubmitting) return;
@@ -1756,12 +1782,7 @@
       state.isAuthSubmitting = true;
       $('#login-submit').disabled = true;
       try {
-        const res = await fetch('api/auth/login', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
+        const res = await postAuthJson('api/auth/login', { username, password });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           $('#login-error').textContent = data.error || `ログインに失敗しました (HTTP ${res.status})`;
@@ -1773,7 +1794,7 @@
           `${data.user.username} として再ログインしました。投稿を続けられます。`
         );
       } catch {
-        $('#login-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
+        $('#login-error').textContent = NET_ERR_RETRY;
       } finally {
         state.isAuthSubmitting = false;
         $('#login-submit').disabled = false;
@@ -1811,12 +1832,7 @@
       state.isAuthSubmitting = true;
       $('#register-submit').disabled = true;
       try {
-        const res = await fetch('api/auth/register', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ username, password }),
-        });
+        const res = await postAuthJson('api/auth/register', { username, password });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           $('#register-error').textContent = data.error || `登録に失敗しました (HTTP ${res.status})`;
@@ -1828,7 +1844,7 @@
           `アカウント「${data.user.username}」を作成しログインしました。投稿を続けられます。`
         );
       } catch {
-        $('#register-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
+        $('#register-error').textContent = NET_ERR_RETRY;
       } finally {
         state.isAuthSubmitting = false;
         $('#register-submit').disabled = false;
@@ -1858,12 +1874,7 @@
       state.isAuthSubmitting = true;
       $('#password-submit').disabled = true;
       try {
-        const res = await fetch('api/auth/password', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: JSON.stringify({ currentPassword, newPassword }),
-        });
+        const res = await postAuthJson('api/auth/password', { currentPassword, newPassword });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           if (res.status === 401 && !String(data.error || '').includes('現在のパスワード')) {
@@ -1889,7 +1900,7 @@
         }
         notify('パスワードを変更しました。新しいパスワードで再ログインしてください。');
       } catch {
-        $('#password-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
+        $('#password-error').textContent = NET_ERR_RETRY;
       } finally {
         state.isAuthSubmitting = false;
         $('#password-submit').disabled = false;
@@ -1907,12 +1918,7 @@
       let logoutSucceeded = false;
       let logoutPerms = null;
       try {
-        const res = await fetch('api/auth/logout', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-          body: '{}',
-        });
+        const res = await postAuthJson('api/auth/logout', {});
         const data = await res.json().catch(() => ({}));
         if (res.ok) {
           logoutSucceeded = true;

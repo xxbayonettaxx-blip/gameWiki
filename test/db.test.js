@@ -1739,6 +1739,72 @@ test('v1.2 ロール・権限管理(DB): v3→v4移行・権限冪等保持・ru
     assert.ok(actions.includes('role_permissions_update'));
     assert.ok(actions.includes('user_role_change'));
     assert.ok(actions.includes('user_revoke_sessions'));
+
+    // 6. レビュー指摘(P2 #1): 権限レコード欠損時の Fail-Closed 判定と欠損検知・修復監査
+    reopened.execRawForTesting(
+      "DELETE FROM role_permissions WHERE role = 'guest' AND permission_key = 'create_post'"
+    );
+    assert.equal(reopened.getEffectivePermissionsForRole('guest').create_post, false);
+    assert.deepEqual(reopened.getMissingRolePermissions(), [
+      { role: 'guest', permissionKey: 'create_post' },
+    ]);
+    assert.deepEqual(reopened.getStatus().missingRolePermissions, [
+      { role: 'guest', permissionKey: 'create_post' },
+    ]);
+    assert.throws(
+      () =>
+        reopened.createPost({
+          threadId: 1,
+          authorName: '欠損ゲスト',
+          visitorId: 'vis-miss-g',
+          content: '欠損行での投稿拒否確認',
+          enforceRole: 'guest',
+        }),
+      (err) => err.statusCode === 403 && err.code === 'PERMISSION_DENIED'
+    );
+
+    // 欠損キーを修復保存（値は false のままでも欠損修復として書き戻され、監査へ repairedMissingKeys を残すこと）
+    const repairGuest = reopened.updateRolePermissions({
+      role: 'guest',
+      permissions: { create_post: false },
+      audit: { actorType: 'admin_web', actorUserId: 2, actorUsername: 'member_a' },
+    });
+    assert.equal(repairGuest.unchanged, false);
+    assert.deepEqual(repairGuest.repairedMissingKeys, ['create_post']);
+    assert.deepEqual(reopened.getMissingRolePermissions(), []);
+    const repairLog = reopened.listAdminAuditLogs({ limit: 5 }).logs.find(
+      (l) => l.action === 'role_permissions_update' && Array.isArray(l.detail?.repairedMissingKeys)
+    );
+    assert.ok(repairLog);
+    assert.deepEqual(repairLog.detail.repairedMissingKeys, ['create_post']);
+
+    // user の create_post 行欠損でも Fail-Closed になる一方、admin は常時許可のままであること
+    reopened.execRawForTesting(
+      "DELETE FROM role_permissions WHERE role = 'user' AND permission_key = 'create_post'"
+    );
+    assert.equal(reopened.getEffectivePermissionsForRole('user').create_post, false);
+    assert.throws(
+      () =>
+        reopened.createPost({
+          threadId: 1,
+          authorName: 'root_admin',
+          visitorId: 'vis-miss-u',
+          content: 'user欠損時拒否確認',
+          createdBy: 1,
+          enforceRole: 'user',
+        }),
+      (err) => err.statusCode === 403 && err.code === 'PERMISSION_DENIED'
+    );
+    assert.equal(reopened.getEffectivePermissionsForRole('admin').create_post, true);
+    const adminPostOnUserMiss = reopened.createPost({
+      threadId: 1,
+      authorName: 'member_a',
+      visitorId: 'vis-miss-a',
+      content: 'admin常時許可確認',
+      createdBy: 2,
+      enforceRole: 'admin',
+    });
+    assert.equal(adminPostOnUserMiss.content, 'admin常時許可確認');
   } finally {
     try { rawV3?.close(); } catch {}
     try { inspectSrc?.close(); } catch {}

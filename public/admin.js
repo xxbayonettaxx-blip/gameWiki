@@ -97,6 +97,8 @@
     usersTotal: 0,
     usersOffset: 0,
     permissions: null,
+    missingPermissions: [],
+    permissionDrafts: { user: null, guest: null },
     pendingPermRoles: new Set(),
     auditLogs: [],
     auditHasMore: false,
@@ -945,7 +947,46 @@
     }
   }
 
+  function samePermissionMap(a, b) {
+    if (!a || !b) return false;
+    return PERMISSION_META.every((perm) => Boolean(a[perm.key]) === Boolean(b[perm.key]));
+  }
+
+  function pruneCleanPermissionDrafts() {
+    for (const role of ['user', 'guest']) {
+      const draft = state.permissionDrafts[role];
+      const serverPerms = state.permissions?.[role];
+      if (draft && serverPerms && samePermissionMap(draft, serverPerms)) {
+        state.permissionDrafts[role] = null;
+      }
+    }
+  }
+
+  function syncPermissionCardStatusBadge(role) {
+    const badge = $(`#perm-card-status-${role}`);
+    if (!badge) return;
+    const serverPerms = state.permissions?.[role] || {};
+    const draftPerms = state.permissionDrafts[role];
+    const isDirty = Boolean(draftPerms && !samePermissionMap(draftPerms, serverPerms));
+    badge.className = isDirty ? 'badge violet' : 'badge count';
+    badge.textContent = isDirty ? '未保存の変更あり' : '編集可';
+  }
+
   function renderPermissionsSection() {
+    const missingWarnEl = $('#permissions-missing-warning');
+    if (missingWarnEl) {
+      if (Array.isArray(state.missingPermissions) && state.missingPermissions.length > 0) {
+        const listText = state.missingPermissions
+          .map((m) => `${m.role}.${m.permissionKey}`)
+          .join(', ');
+        missingWarnEl.hidden = false;
+        missingWarnEl.textContent = `role_permissions に欠損行があります（安全のため該当権限は拒否扱いです）。対象ロールの「権限を保存」で修復してください: ${listText}`;
+      } else {
+        missingWarnEl.hidden = true;
+        missingWarnEl.textContent = '';
+      }
+    }
+
     const grid = $('#permissions-grid');
     if (!grid) return;
     grid.replaceChildren();
@@ -957,14 +998,19 @@
 
     for (const cardMeta of ROLE_PERMISSION_CARDS) {
       const role = cardMeta.role;
-      const rolePerms = state.permissions[role] || {};
+      const serverPerms = state.permissions[role] || {};
+      const draftPerms = state.permissionDrafts[role];
+      const isDirty = Boolean(draftPerms && !samePermissionMap(draftPerms, serverPerms));
+      const displayPerms = isDirty ? draftPerms : serverPerms;
       const card = el('section', 'perm-card');
       card.setAttribute('aria-labelledby', `perm-card-title-${role}`);
 
       const cardHead = el('div', 'perm-card-head');
       const h3 = el('h3', '', cardMeta.title);
       h3.id = `perm-card-title-${role}`;
-      cardHead.append(h3, el('span', 'badge count', '編集可'));
+      const statusBadge = el('span', isDirty ? 'badge violet' : 'badge count', isDirty ? '未保存の変更あり' : '編集可');
+      statusBadge.id = `perm-card-status-${role}`;
+      cardHead.append(h3, statusBadge);
 
       const desc = el('p', 'dialog-muted-note', cardMeta.note);
       const list = el('div', 'perm-list');
@@ -975,7 +1021,7 @@
         cb.type = 'checkbox';
         cb.dataset.permRole = role;
         cb.dataset.permKey = perm.key;
-        cb.checked = Boolean(rolePerms[perm.key]);
+        cb.checked = Boolean(displayPerms[perm.key]);
         const textWrap = el('span', 'perm-toggle-text');
         textWrap.append(el('strong', '', perm.label), el('small', '', perm.desc));
         label.append(cb, textWrap);
@@ -1063,10 +1109,14 @@
       'perm-admin-note',
       '管理者（admin）はすべての権限が常に ON 固定であり、この画面や API から変更できません。'
     );
+    const missingWarn = el('div', 'danger-notice perm-missing-warn');
+    missingWarn.id = 'permissions-missing-warning';
+    missingWarn.setAttribute('role', 'alert');
+    missingWarn.hidden = true;
     const grid = el('div', 'perm-grid');
     grid.id = 'permissions-grid';
 
-    permsPanel.append(permHead, adminNote, grid);
+    permsPanel.append(permHead, adminNote, missingWarn, grid);
 
     wrap.append(panel, permsPanel);
     return wrap;
@@ -1223,6 +1273,8 @@
   async function loadPermissions() {
     const data = await apiRequest('./api/admin/permissions');
     state.permissions = data.permissions || null;
+    state.missingPermissions = Array.isArray(data.missingPermissions) ? data.missingPermissions : [];
+    pruneCleanPermissionDrafts();
     renderPermissionsSection();
   }
 
@@ -2111,6 +2163,7 @@
         permissions[cb.dataset.permKey] = Boolean(cb.checked);
       }
     }
+    const submittedSnapshot = { ...permissions };
 
     state.pendingPermRoles.add(role);
     showErrorBanner('');
@@ -2141,6 +2194,11 @@
     if (res?.allPermissions) {
       state.permissions = res.allPermissions;
     }
+    state.missingPermissions = Array.isArray(res?.missingPermissions) ? res.missingPermissions : [];
+    if (!state.permissionDrafts[role] || samePermissionMap(state.permissionDrafts[role], submittedSnapshot)) {
+      state.permissionDrafts[role] = null;
+    }
+    pruneCleanPermissionDrafts();
     renderPermissionsSection();
     const roleLabel = role === 'user' ? '一般会員 (user)' : '未ログイン (guest)';
     notify(
@@ -2157,6 +2215,7 @@
   function bindEvents() {
     $('#admin-reload-all')?.addEventListener('click', async () => {
       state.refreshSeq += 1;
+      state.permissionDrafts = { user: null, guest: null };
       try {
         await refreshAllActiveData();
         notify('最新の管理データを再読込しました。');
@@ -2208,6 +2267,21 @@
       if (ev.target.id === 'post-filter') {
         state.postFilter = ev.target.value;
         renderModPosts();
+        return;
+      }
+      if (ev.target.matches?.('input[type="checkbox"][data-perm-role][data-perm-key]')) {
+        const role = ev.target.dataset.permRole;
+        const key = ev.target.dataset.permKey;
+        if (role === 'user' || role === 'guest') {
+          const base = state.permissionDrafts[role] || state.permissions?.[role] || {};
+          const nextDraft = { ...base, [key]: Boolean(ev.target.checked) };
+          if (state.permissions?.[role] && samePermissionMap(nextDraft, state.permissions[role])) {
+            state.permissionDrafts[role] = null;
+          } else {
+            state.permissionDrafts[role] = nextDraft;
+          }
+          syncPermissionCardStatusBadge(role);
+        }
       }
     });
 

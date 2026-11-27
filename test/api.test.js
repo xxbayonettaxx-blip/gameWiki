@@ -2579,10 +2579,50 @@ test('v1.2 ロール・権限管理(API・競合・投稿制限)', async (t) => 
   assert.ok(selfRevokeRes.headers.get('set-cookie')?.includes('Max-Age=0'));
   assert.equal((await selfRevokeRes.json()).selfSessionRevoked, true);
 
-  // 4. 秘密情報非露出検査（管理API一覧・権限・監査ログ）
+  // 4. レビュー指摘(P2 #1): DB上の権限行欠損時の Fail-Closed 強制と管理APIでの欠損通知・修復
+  ctx.db.execRawForTesting(
+    "DELETE FROM role_permissions WHERE role = 'guest' AND permission_key = 'create_post'"
+  );
+  const missBoot = await (await fetch(`${origin}/api/bootstrap`)).json();
+  assert.equal(missBoot.permissions.create_post, false);
+  const missMe = await (await fetch(`${origin}/api/auth/me`)).json();
+  assert.equal(missMe.permissions.create_post, false);
+  const missPost = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ thread_id: 1, author_name: '欠損確認', content: '欠損時は拒否' }),
+  });
+  assert.equal(missPost.status, 403);
+  assert.equal((await missPost.json()).code, 'PERMISSION_DENIED');
+
   const { cookie: inspectCookie } = makeFreshCookieFor(
     ctx.db.getUserForAuthByUsername(survivingAdmin.username)
   );
+  const missAdminPerms = await (
+    await fetch(`${origin}/api/admin/permissions`, { headers: { Cookie: inspectCookie } })
+  ).json();
+  assert.deepEqual(missAdminPerms.missingPermissions, [
+    { role: 'guest', permissionKey: 'create_post' },
+  ]);
+
+  const repairRes = await fetch(`${origin}/api/admin/permissions/guest`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: inspectCookie },
+    body: JSON.stringify({ permissions: { create_post: true } }),
+  });
+  assert.equal(repairRes.status, 200);
+  const repairJson = await repairRes.json();
+  assert.deepEqual(repairJson.repairedMissingKeys, ['create_post']);
+  assert.deepEqual(repairJson.missingPermissions, []);
+
+  const restoredPost = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ thread_id: 1, author_name: '修復確認', content: '修復後の投稿許可' }),
+  });
+  assert.equal(restoredPost.status, 201);
+
+  // 5. 秘密情報非露出検査（管理API一覧・権限・監査ログ）
   for (const inspectPath of ['/api/admin/permissions', '/api/admin/users?limit=20', '/api/admin/audit-logs?limit=50']) {
     const raw = await (await fetch(`${origin}${inspectPath}`, { headers: { Cookie: inspectCookie } })).text();
     for (const secretSubstr of ['scrypt$', normalTokenHash, rawTok2, rawTok3]) {

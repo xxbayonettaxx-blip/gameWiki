@@ -2678,6 +2678,53 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
         false
       );
 
+      // P2 #2 回帰: 両カードを編集し、左右どちらを先に保存しても他方の未保存状態が消えないこと
+      await click('input[data-perm-role="user"][data-perm-key="create_post"]');
+      await click('input[data-perm-role="guest"][data-perm-key="create_post"]');
+      await waitFor(
+        "document.querySelector('#perm-card-status-user')?.textContent === '未保存の変更あり' && document.querySelector('#perm-card-status-guest')?.textContent === '未保存の変更あり'"
+      );
+      await click('#save-perms-guest-btn');
+      await waitFor(
+        "document.querySelector('#toast')?.textContent.includes('保存しました') && document.querySelector('#perm-card-status-guest')?.textContent === '編集可'"
+      );
+      assert.equal(
+        await evaluate("document.querySelector('input[data-perm-role=\"guest\"][data-perm-key=\"create_post\"]').checked"),
+        true
+      );
+      assert.equal(
+        await evaluate("document.querySelector('input[data-perm-role=\"user\"][data-perm-key=\"create_post\"]').checked"),
+        false
+      );
+      assert.equal(await evaluate("document.querySelector('#perm-card-status-user').textContent"), '未保存の変更あり');
+
+      await click('#save-perms-user-btn');
+      await waitFor("document.querySelector('#perm-card-status-user')?.textContent === '編集可'");
+      assert.deepEqual(db.getAllRolePermissions().user.create_post, false);
+      assert.deepEqual(db.getAllRolePermissions().guest.create_post, true);
+
+      // 逆順（user を先、guest を後）でも未保存が保持されること（終了時状態: user=true, guest=false）
+      await click('input[data-perm-role="user"][data-perm-key="create_post"]');
+      await click('input[data-perm-role="guest"][data-perm-key="create_post"]');
+      await waitFor(
+        "document.querySelector('#perm-card-status-user')?.textContent === '未保存の変更あり' && document.querySelector('#perm-card-status-guest')?.textContent === '未保存の変更あり'"
+      );
+      await click('#save-perms-user-btn');
+      await waitFor("document.querySelector('#perm-card-status-user')?.textContent === '編集可'");
+      assert.equal(
+        await evaluate("document.querySelector('input[data-perm-role=\"user\"][data-perm-key=\"create_post\"]').checked"),
+        true
+      );
+      assert.equal(
+        await evaluate("document.querySelector('input[data-perm-role=\"guest\"][data-perm-key=\"create_post\"]').checked"),
+        false
+      );
+      assert.equal(await evaluate("document.querySelector('#perm-card-status-guest').textContent"), '未保存の変更あり');
+      await click('#save-perms-guest-btn');
+      await waitFor("document.querySelector('#perm-card-status-guest')?.textContent === '編集可'");
+      assert.equal(db.getAllRolePermissions().user.create_post, true);
+      assert.equal(db.getAllRolePermissions().guest.create_post, false);
+
       // 監査ログに3種類の Step 2 操作が記録されていること
       await click('#nav-btn-audit');
       await waitFor("document.querySelector('#audit-list')?.textContent.includes('role_permissions_update')");
@@ -2700,13 +2747,84 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
       await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
       const guestComposerState = await evaluate(`({
         permHidden: document.querySelector('#composer-perm-box').hidden,
+        recheckHidden: document.querySelector('#composer-recheck-perm-btn').hidden,
         permMsg: document.querySelector('#composer-perm-message').textContent,
         submitDisabled: document.querySelector('#submit-button').disabled,
       })`);
       assert.equal(guestComposerState.permHidden, false);
+      assert.equal(guestComposerState.recheckHidden, false);
       assert.ok(guestComposerState.permMsg.includes('未ログイン'), JSON.stringify(guestComposerState));
       assert.equal(guestComposerState.submitDisabled, true);
 
+      await click('#composer-close');
+      await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+
+      // P3 #3 回帰: 制限中に返信下書き・名前を入力した状態で制限解除 →「↻ 更新」および「権限を再確認」で下書き・返信先を保ったまま送信可に復帰すること
+      await click('#comments .reply-button');
+      await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#composer-mode-badge')?.textContent.includes('返信モード')");
+      await setField('#author-name', 'P3保持テスト名');
+      await setField('#comment-body', '制限中に入力した大切な下書き');
+      assert.equal(await evaluate("document.querySelector('#composer-perm-box').hidden"), false);
+      assert.equal(await evaluate("document.querySelector('#submit-button').disabled"), true);
+
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: true },
+        audit: { actorType: 'admin_web', actorUsername: 'race_reg_user' },
+      });
+      await click('#reload-thread');
+      await waitFor(
+        "document.querySelector('#composer-perm-box')?.hidden === true && document.querySelector('#submit-button')?.disabled === false"
+      );
+      const afterReloadDraft = await evaluate(`({
+        body: document.querySelector('#comment-body').value,
+        author: document.querySelector('#author-name').value,
+        badge: document.querySelector('#composer-mode-badge').textContent,
+      })`);
+      assert.equal(afterReloadDraft.body, '制限中に入力した大切な下書き');
+      assert.equal(afterReloadDraft.author, 'P3保持テスト名');
+      assert.ok(afterReloadDraft.badge.includes('返信モード'), afterReloadDraft.badge);
+
+      // 再度ゲスト投稿を停止し、「↻ 更新」で再び制限 → DBで再許可後、シート内「権限を再確認」で復帰できることも確認
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: false },
+        audit: { actorType: 'admin_web', actorUsername: 'race_reg_user' },
+      });
+      await click('#reload-thread');
+      await waitFor(
+        "document.querySelector('#composer-perm-box')?.hidden === false && document.querySelector('#submit-button')?.disabled === true"
+      );
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: true },
+        audit: { actorType: 'admin_web', actorUsername: 'race_reg_user' },
+      });
+      await click('#composer-recheck-perm-btn');
+      await waitFor(
+        "document.querySelector('#composer-perm-box')?.hidden === true && document.querySelector('#submit-button')?.disabled === false && document.querySelector('#toast')?.textContent.includes('投稿権限を確認しました')"
+      );
+      const afterRecheckDraft = await evaluate(`({
+        body: document.querySelector('#comment-body').value,
+        author: document.querySelector('#author-name').value,
+        badge: document.querySelector('#composer-mode-badge').textContent,
+      })`);
+      assert.equal(afterRecheckDraft.body, '制限中に入力した大切な下書き');
+      assert.equal(afterRecheckDraft.author, 'P3保持テスト名');
+      assert.ok(afterRecheckDraft.badge.includes('返信モード'), afterRecheckDraft.badge);
+
+      // 後続テスト（guest停止 -> ログインで即解除）のため下書きクリア＆再度 guest 停止状態へ戻す
+      await click('#reply-switch-new');
+      await setField('#comment-body', '');
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: false },
+        audit: { actorType: 'admin_web', actorUsername: 'race_reg_user' },
+      });
+      await click('#reload-thread');
+      await waitFor(
+        "document.querySelector('#composer-perm-box')?.hidden === false && document.querySelector('#submit-button')?.disabled === true"
+      );
       await click('#composer-close');
       await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
 
@@ -2730,6 +2848,11 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     } finally {
       db.updateRolePermissions({
         role: 'guest',
+        permissions: { create_post: true },
+        audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
+      });
+      db.updateRolePermissions({
+        role: 'user',
         permissions: { create_post: true },
         audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
       });

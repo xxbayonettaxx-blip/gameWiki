@@ -83,6 +83,13 @@ function startServer() {
     console.log(
       `[STARTUP] SQLite設定   : foreign_keys=${dbStatus.foreignKeys}, journal_mode=${dbStatus.journalMode}, schemaVersion=${dbStatus.schemaVersion}`
     );
+    if (Array.isArray(dbStatus.missingRolePermissions) && dbStatus.missingRolePermissions.length > 0) {
+      console.warn(
+        `[WARN] role_permissions 欠損行を検出（安全のため拒否扱い）: ${dbStatus.missingRolePermissions
+          .map((m) => `${m.role}.${m.permissionKey}`)
+          .join(', ')}`
+      );
+    }
     console.log(`[STARTUP] プロキシ信頼 : trustProxy=${trustProxy}`);
     console.log(
       `[STARTUP] 認証構成     : allowSignup=${allowSignup}, cookieMode=${devInsecureCookie ? 'DEV HTTP' : 'HTTPS __Host-'}, allowedOrigin=${allowedOrigin ? allowedOrigin.trim() : '(Host自動)'}`

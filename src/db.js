@@ -787,18 +787,43 @@ function createBoardDb(options = {}) {
       );
     }
 
-    function readRolePermissionsMap(role) {
+    function inspectRolePermissionsInDb(role) {
       if (role === 'admin') {
-        return { ...DEFAULT_ROLE_PERMISSIONS.admin };
+        return {
+          permissions: { ...DEFAULT_ROLE_PERMISSIONS.admin },
+          presentKeys: new Set(PERMISSION_KEYS),
+          missingKeys: [],
+        };
       }
       const cleanRole = validatePermissionRole(role);
-      const result = { ...DEFAULT_ROLE_PERMISSIONS[cleanRole] };
+      const permissions = {};
+      for (const key of PERMISSION_KEYS) {
+        permissions[key] = false;
+      }
+      const presentKeys = new Set();
       for (const row of stmts.listPermissionsByRole.all(cleanRole)) {
         if (PERMISSION_KEYS.includes(row.permission_key)) {
-          result[row.permission_key] = Boolean(row.allowed);
+          presentKeys.add(row.permission_key);
+          permissions[row.permission_key] = Number(row.allowed) === 1;
         }
       }
-      return result;
+      const missingKeys = PERMISSION_KEYS.filter((key) => !presentKeys.has(key));
+      return { permissions, presentKeys, missingKeys };
+    }
+
+    function readRolePermissionsMap(role) {
+      return inspectRolePermissionsInDb(role).permissions;
+    }
+
+    function listMissingRolePermissions() {
+      const missing = [];
+      for (const role of ['user', 'guest']) {
+        const { missingKeys } = inspectRolePermissionsInDb(role);
+        for (const permissionKey of missingKeys) {
+          missing.push({ role, permissionKey });
+        }
+      }
+      return missing;
     }
 
     function applyUserRoleChangeInTx(actor, user, cleanRole) {
@@ -891,6 +916,7 @@ function createBoardDb(options = {}) {
           schemaVersion,
           maxPostsPerThread,
           maxReplyDepth,
+          missingRolePermissions: listMissingRolePermissions(),
         };
       },
 
@@ -1893,6 +1919,10 @@ function createBoardDb(options = {}) {
         return readRolePermissionsMap(role === 'admin' ? 'admin' : role === 'user' ? 'user' : 'guest');
       },
 
+      getMissingRolePermissions() {
+        return listMissingRolePermissions();
+      },
+
       getAllRolePermissions() {
         return {
           admin: readRolePermissionsMap('admin'),
@@ -1906,25 +1936,31 @@ function createBoardDb(options = {}) {
         const patch = validateRolePermissionsPayload(permissions);
         return runInTransaction(() => {
           const actor = resolveAuditActorInTx(adminAuth, audit);
-          const before = readRolePermissionsMap(cleanRole);
+          const { permissions: before, presentKeys } = inspectRolePermissionsInDb(cleanRole);
           const changedKeys = [];
+          const repairedMissingKeys = [];
           for (const [key, nextVal] of Object.entries(patch)) {
+            if (!presentKeys.has(key)) {
+              repairedMissingKeys.push(key);
+            }
             if (before[key] !== nextVal) {
               changedKeys.push(key);
             }
           }
-          if (changedKeys.length === 0) {
+          const keysToWrite = [...new Set([...changedKeys, ...repairedMissingKeys])];
+          if (keysToWrite.length === 0) {
             return {
               role: cleanRole,
               permissions: before,
               unchanged: true,
               changedKeys: [],
+              repairedMissingKeys: [],
             };
           }
-          for (const key of changedKeys) {
+          for (const key of keysToWrite) {
             stmts.upsertRolePermission.run(cleanRole, key, patch[key] ? 1 : 0);
           }
-          const after = readRolePermissionsMap(cleanRole);
+          const afterState = inspectRolePermissionsInDb(cleanRole);
           recordAuditInTx(actor, {
             action: 'role_permissions_update',
             targetType: 'role',
@@ -1932,15 +1968,18 @@ function createBoardDb(options = {}) {
             detail: {
               role: cleanRole,
               before,
-              after,
+              after: afterState.permissions,
               changedKeys,
+              ...(repairedMissingKeys.length > 0 ? { repairedMissingKeys } : {}),
+              ...(afterState.missingKeys.length > 0 ? { remainingMissingKeys: afterState.missingKeys } : {}),
             },
           });
           return {
             role: cleanRole,
-            permissions: after,
+            permissions: afterState.permissions,
             unchanged: false,
             changedKeys,
+            repairedMissingKeys,
           };
         });
       },

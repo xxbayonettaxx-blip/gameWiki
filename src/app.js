@@ -1453,6 +1453,7 @@ function createApp(options = {}) {
         if (!adminCtx) return;
         sendJson(res, 200, {
           permissions: db.getAllRolePermissions(),
+          missingPermissions: db.getMissingRolePermissions(),
           keys: PERMISSION_KEYS,
           editableRoles: EDITABLE_PERMISSION_ROLES,
         });
@@ -1483,7 +1484,9 @@ function createApp(options = {}) {
           role: result.role,
           permissions: result.permissions,
           unchanged: result.unchanged,
+          repairedMissingKeys: result.repairedMissingKeys || [],
           allPermissions: db.getAllRolePermissions(),
+          missingPermissions: db.getMissingRolePermissions(),
         });
         return;
       }
