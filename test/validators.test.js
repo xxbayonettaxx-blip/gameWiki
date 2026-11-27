@@ -18,6 +18,10 @@ const {
   validateUsername,
   validatePassword,
   validateUserRole,
+  validatePermissionRole,
+  validateRolePermissionsPayload,
+  PERMISSION_KEYS,
+  DEFAULT_ROLE_PERMISSIONS,
   validateAuthRegisterInput,
   validateAuthLoginInput,
   validateChangePasswordInput,
@@ -210,4 +214,51 @@ test('validateUsername & validatePassword: 境界値・Unicode単位・トリム
 
   const chg = validateChangePasswordInput({ currentPassword: 'old', newPassword: 'newpassword123' });
   assert.deepEqual(chg, { currentPassword: 'old', newPassword: 'newpassword123' });
+});
+
+test('validatePermissionRole & validateRolePermissionsPayload: user/guest限定・未知キー・型不正を検査する', () => {
+  assert.deepEqual(PERMISSION_KEYS, ['create_post', 'create_thread', 'pin_post', 'upload_image']);
+  assert.equal(DEFAULT_ROLE_PERMISSIONS.admin.create_post, true);
+  assert.equal(DEFAULT_ROLE_PERMISSIONS.user.create_post, true);
+  assert.equal(DEFAULT_ROLE_PERMISSIONS.guest.create_post, true);
+
+  assert.equal(validatePermissionRole('user'), 'user');
+  assert.equal(validatePermissionRole('guest'), 'guest');
+  for (const badRole of ['admin', '', null, undefined, 'moderator', 123]) {
+    assert.throws(
+      () => validatePermissionRole(badRole),
+      (err) => err instanceof ValidationError && err.statusCode === 400
+    );
+  }
+
+  assert.deepEqual(
+    validateRolePermissionsPayload({ permissions: { create_post: false, upload_image: true } }),
+    { create_post: false, upload_image: true }
+  );
+  assert.deepEqual(validateRolePermissionsPayload({ create_post: true }), { create_post: true });
+
+  // 未知権限キー・トップレベル余剰キー・真偽値以外・空オブジェクトを拒否
+  assert.throws(
+    () => validateRolePermissionsPayload({ create_post: true, delete_all: true }),
+    (err) => err instanceof ValidationError && err.statusCode === 400 && err.code === 'UNKNOWN_PERMISSION_KEY'
+  );
+  assert.throws(
+    () => validateRolePermissionsPayload({ permissions: { create_post: true }, extra: 1 }),
+    (err) => err instanceof ValidationError && err.statusCode === 400 && err.code === 'UNKNOWN_PERMISSION_KEY'
+  );
+  for (const badPayload of [
+    null,
+    [],
+    {},
+    { permissions: {} },
+    { permissions: 'invalid' },
+    { create_post: 1 },
+    { create_post: 'true' },
+    { create_post: null },
+  ]) {
+    assert.throws(
+      () => validateRolePermissionsPayload(badPayload),
+      (err) => err instanceof ValidationError && err.statusCode === 400
+    );
+  }
 });

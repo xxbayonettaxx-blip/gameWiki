@@ -2161,3 +2161,432 @@ test('v1.1管理MVP(CRUD・競合): カテゴリ/スレッドCRUD・削除直前
   const adminWebLog = auditData.logs.find((l) => l.actorUsername === admin1.username);
   assert.equal(adminWebLog.actorType, 'admin_web');
 });
+
+test('v1.2 ロール・権限管理(API・競合・投稿制限)', async (t) => {
+  const http = require('node:http');
+  const fastScryptQueue = createScryptQueue({ scryptFn: makeFastScryptFn() });
+  const ctx = await startTestServer({
+    scryptQueue: fastScryptQueue,
+    devInsecureCookie: true,
+    rateLimitMaxPosts: 100,
+    authRateLimitMaxPerIp: 100,
+    authRateLimitMaxPerAccount: 100,
+  });
+  t.after(() => ctx.stop());
+  const origin = ctx.baseUrl;
+
+  const { user: normalUser, cookie: normalCookie, tokenHash: normalTokenHash } = createDirectUserSessionCookie(ctx, {
+    username: 'v12_normal_user',
+    role: 'user',
+  });
+  const { cookie: tempAdminCookie } = createDirectUserSessionCookie(ctx, {
+    username: 'v12_temp_admin',
+    role: 'admin',
+    mustChangePassword: true,
+  });
+  const { user: adminUser, cookie: adminCookie } = createDirectUserSessionCookie(ctx, {
+    username: 'v12_root_admin',
+    role: 'admin',
+    mustChangePassword: false,
+  });
+
+  // 1. 新規4管理APIの認可マトリクス (guest 401 / user 403 / 仮PW admin 403 / Origin 403 / no-store)
+  const newAdminTargets = [
+    { path: '/api/admin/permissions', method: 'GET' },
+    { path: '/api/admin/permissions/guest', method: 'PUT', body: { permissions: { create_post: true } } },
+    { path: `/api/admin/users/${normalUser.id}/role`, method: 'PATCH', body: { role: 'user' } },
+    { path: `/api/admin/users/${normalUser.id}/revoke-sessions`, method: 'POST', body: {} },
+  ];
+
+  for (const tgt of newAdminTargets) {
+    const isMut = tgt.method !== 'GET';
+    const makeHeaders = (extra = {}) => ({
+      ...(isMut ? { 'Content-Type': 'application/json', Origin: origin } : {}),
+      ...extra,
+    });
+
+    const guestRes = await fetch(`${origin}${tgt.path}`, {
+      method: tgt.method,
+      headers: makeHeaders(),
+      ...(isMut ? { body: JSON.stringify(tgt.body) } : {}),
+    });
+    assert.equal(guestRes.status, 401, `guest rejected at ${tgt.method} ${tgt.path}`);
+    assert.equal(guestRes.headers.get('cache-control'), 'no-store');
+
+    const userRes = await fetch(`${origin}${tgt.path}`, {
+      method: tgt.method,
+      headers: makeHeaders({ Cookie: normalCookie }),
+      ...(isMut ? { body: JSON.stringify(tgt.body) } : {}),
+    });
+    assert.equal(userRes.status, 403, `user rejected at ${tgt.method} ${tgt.path}`);
+    assert.equal(userRes.headers.get('cache-control'), 'no-store');
+
+    const tempRes = await fetch(`${origin}${tgt.path}`, {
+      method: tgt.method,
+      headers: makeHeaders({ Cookie: tempAdminCookie }),
+      ...(isMut ? { body: JSON.stringify(tgt.body) } : {}),
+    });
+    assert.equal(tempRes.status, 403, `temp admin rejected at ${tgt.method} ${tgt.path}`);
+    assert.equal((await tempRes.json()).code, 'PASSWORD_CHANGE_REQUIRED');
+
+    if (isMut) {
+      const noOriginRes = await fetch(`${origin}${tgt.path}`, {
+        method: tgt.method,
+        headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+        body: JSON.stringify(tgt.body),
+      });
+      assert.equal(noOriginRes.status, 403, `missing Origin rejected at ${tgt.method} ${tgt.path}`);
+
+      const wrongOriginRes = await fetch(`${origin}${tgt.path}`, {
+        method: tgt.method,
+        headers: { 'Content-Type': 'application/json', Origin: 'https://evil.example', Cookie: adminCookie },
+        body: JSON.stringify(tgt.body),
+      });
+      assert.equal(wrongOriginRes.status, 403, `cross Origin rejected at ${tgt.method} ${tgt.path}`);
+    }
+  }
+
+  // 2. GET / PUT /api/admin/permissions 異常系・伝播・POST /api/posts 強制
+  const getPermsRes = await fetch(`${origin}/board/api/admin/permissions`, {
+    headers: { Cookie: adminCookie },
+  });
+  assert.equal(getPermsRes.status, 200);
+  const getPermsData = await getPermsRes.json();
+  assert.equal(getPermsData.permissions.admin.create_post, true);
+  assert.equal(getPermsData.permissions.guest.create_post, true);
+
+  const editAdminPermRes = await fetch(`${origin}/api/admin/permissions/admin`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ permissions: { create_post: false } }),
+  });
+  assert.equal(editAdminPermRes.status, 400);
+
+  const unknownKeyRes = await fetch(`${origin}/api/admin/permissions/guest`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ permissions: { bad_perm: false } }),
+  });
+  assert.equal(unknownKeyRes.status, 400);
+  assert.equal((await unknownKeyRes.json()).code, 'UNKNOWN_PERMISSION_KEY');
+
+  // guest の create_post を false にする → bootstrap / me / POST /api/posts に即時反映
+  const disableGuestRes = await fetch(`${origin}/board/api/admin/permissions/guest`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ permissions: { create_post: false } }),
+  });
+  assert.equal(disableGuestRes.status, 200);
+  const disableGuestJson = await disableGuestRes.json();
+  assert.equal(disableGuestJson.allPermissions.guest.create_post, false);
+
+  const guestBoot = await (await fetch(`${origin}/api/bootstrap`)).json();
+  assert.equal(guestBoot.permissions.create_post, false);
+  const guestMe = await (await fetch(`${origin}/api/auth/me`)).json();
+  assert.equal(guestMe.permissions.create_post, false);
+
+  const guestPostDenied = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ thread_id: 1, author_name: 'ゲスト', content: '停止中投稿' }),
+  });
+  assert.equal(guestPostDenied.status, 403);
+  assert.equal((await guestPostDenied.json()).code, 'PERMISSION_DENIED');
+
+  // user / admin は引き続き 201 投稿可能
+  const userPostAllowed = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: normalCookie },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'guest停止中の会員投稿',
+      expect_auth: true,
+      expected_user_id: normalUser.id,
+    }),
+  });
+  assert.equal(userPostAllowed.status, 201);
+
+  const adminPostAllowed = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'guest停止中の管理者投稿',
+      expect_auth: true,
+      expected_user_id: adminUser.id,
+    }),
+  });
+  assert.equal(adminPostAllowed.status, 201);
+
+  // user の create_post を false にする → user 403 / admin 201
+  const disableUserRes = await fetch(`${origin}/api/admin/permissions/user`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ permissions: { create_post: false } }),
+  });
+  assert.equal(disableUserRes.status, 200);
+
+  const userPostDenied = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: normalCookie },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'user停止中投稿',
+      expect_auth: true,
+      expected_user_id: normalUser.id,
+    }),
+  });
+  assert.equal(userPostDenied.status, 403);
+  assert.equal((await userPostDenied.json()).code, 'PERMISSION_DENIED');
+
+  const adminStillAllowed = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({
+      thread_id: 1,
+      content: 'admin常時許可投稿',
+      expect_auth: true,
+      expected_user_id: adminUser.id,
+    }),
+  });
+  assert.equal(adminStillAllowed.status, 201);
+
+  // パスワード変更(強制ログアウト)と通常ログアウトが guest permissions を返すこと
+  const regPwRes = await fetch(`${origin}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin },
+    body: JSON.stringify({ username: 'v12_pw_sync_user', password: 'pw-sync-pass-123' }),
+  });
+  assert.equal(regPwRes.status, 201);
+  const regPwCookie = extractSetCookiePair(regPwRes);
+  const regPwJson = await regPwRes.json();
+  assert.equal(regPwJson.permissions.create_post, false);
+
+  const pwChangeRes = await fetch(`${origin}/api/auth/password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: regPwCookie },
+    body: JSON.stringify({ currentPassword: 'pw-sync-pass-123', newPassword: 'pw-sync-pass-456' }),
+  });
+  assert.equal(pwChangeRes.status, 200);
+  assert.ok(pwChangeRes.headers.get('set-cookie')?.includes('Max-Age=0'));
+  const pwChangeJson = await pwChangeRes.json();
+  assert.deepEqual(pwChangeJson.permissions, {
+    create_post: false,
+    create_thread: false,
+    pin_post: false,
+    upload_image: false,
+  });
+
+  // 元に戻す (user/guest create_post: true)
+  await fetch(`${origin}/api/admin/permissions/guest`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ permissions: { create_post: true } }),
+  });
+  await fetch(`${origin}/api/admin/permissions/user`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ permissions: { create_post: true } }),
+  });
+
+  // 3. ロール変更・同一ロール no-op・2管理者同時降格競合・自己降格・強制失効・受信中失効
+  const promoteRes = await fetch(`${origin}/board/api/admin/users/${normalUser.id}/role`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  assert.equal(promoteRes.status, 200);
+  const promoteJson = await promoteRes.json();
+  assert.equal(promoteJson.unchanged, false);
+  assert.equal(promoteJson.user.role, 'admin');
+  assert.equal(promoteJson.revokedSessions, 1);
+  assert.equal(promoteJson.selfSessionRevoked, false);
+
+  // 旧 Cookie は /api/auth/me で user:null + Clear-Cookie となり、認証必須 API は即座に 401
+  const staleMemberMe = await fetch(`${origin}/api/auth/me`, { headers: { Cookie: normalCookie } });
+  assert.equal(staleMemberMe.status, 200);
+  assert.ok(staleMemberMe.headers.get('set-cookie')?.includes('Max-Age=0'));
+  assert.equal((await staleMemberMe.json()).user, null);
+  const staleMemberAdmin = await fetch(`${origin}/api/admin/overview`, { headers: { Cookie: normalCookie } });
+  assert.equal(staleMemberAdmin.status, 401);
+
+  // 昇格した v12_normal_user に新しい管理者セッションを発行
+  const normalFreshToken = generateSessionToken();
+  const normalFreshCookie = `${ctx.cookieName}=${normalFreshToken}`;
+  ctx.db.issueSessionIfVersionMatches({
+    userId: normalUser.id,
+    expectedAuthVersion: ctx.db.getUserForAuthByUsername('v12_normal_user').auth_version,
+    tokenHash: hashSessionToken(normalFreshToken),
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    nowIso: new Date().toISOString(),
+  });
+
+  // 同一ロール PATCH は unchanged: true・revokedSessions: 0・セッション維持
+  const noopRoleRes = await fetch(`${origin}/api/admin/users/${normalUser.id}/role`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ role: 'admin' }),
+  });
+  assert.equal(noopRoleRes.status, 200);
+  const noopRoleJson = await noopRoleRes.json();
+  assert.equal(noopRoleJson.unchanged, true);
+  assert.equal(noopRoleJson.revokedSessions, 0);
+  assert.equal((await fetch(`${origin}/api/auth/me`, { headers: { Cookie: normalFreshCookie } })).status, 200);
+
+  // v12_temp_admin を仮PW解除前に一旦降格（残り2管理者: adminUser, normalUser 状態にするため）
+  const clearTempRole = await fetch(`${origin}/api/admin/users/${ctx.db.getUserForAuthByUsername('v12_temp_admin').id}/role`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+    body: JSON.stringify({ role: 'user' }),
+  });
+  assert.equal(clearTempRole.status, 200);
+  assert.equal(ctx.db.getAdminOverview().summary.adminsCount, 2);
+
+  // 2管理者による同時自己降格レース: 一方のみ 200 (selfSessionRevoked: true)、もう一方は 409 LAST_ADMIN_PROTECTED で adminsCount >= 1 を守る
+  const [raceA, raceB] = await Promise.all([
+    fetch(`${origin}/api/admin/users/${normalUser.id}/role`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: normalFreshCookie },
+      body: JSON.stringify({ role: 'user' }),
+    }),
+    fetch(`${origin}/api/admin/users/${adminUser.id}/role`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: adminCookie },
+      body: JSON.stringify({ role: 'user' }),
+    }),
+  ]);
+  const statuses = [raceA.status, raceB.status].sort((a, b) => a - b);
+  assert.deepEqual(statuses, [200, 409]);
+  const winnerRes = raceA.status === 200 ? raceA : raceB;
+  const loserRes = raceA.status === 409 ? raceA : raceB;
+  assert.ok(winnerRes.headers.get('set-cookie')?.includes('Max-Age=0'));
+  assert.equal((await winnerRes.json()).selfSessionRevoked, true);
+  assert.equal((await loserRes.json()).code, 'LAST_ADMIN_PROTECTED');
+  assert.equal(ctx.db.getAdminOverview().summary.adminsCount, 1);
+
+  // 残った1名の管理者を特定してセッション再発行（self-revoke / chunked revoke 検証用）
+  const survivingAdmin =
+    ctx.db.getUserForAuthByUsername('v12_root_admin').role === 'admin'
+      ? ctx.db.getUserForAuthByUsername('v12_root_admin')
+      : ctx.db.getUserForAuthByUsername('v12_normal_user');
+  const otherUser =
+    survivingAdmin.id === adminUser.id ? normalUser : adminUser;
+  const makeFreshCookieFor = (userRow) => {
+    const tok = generateSessionToken();
+    ctx.db.issueSessionIfVersionMatches({
+      userId: userRow.id,
+      expectedAuthVersion: userRow.auth_version,
+      tokenHash: hashSessionToken(tok),
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      nowIso: new Date().toISOString(),
+    });
+    return { cookie: `${ctx.cookieName}=${tok}`, rawTok: tok };
+  };
+  const { cookie: freshAdminCookie } = makeFreshCookieFor(survivingAdmin);
+  const { cookie: targetCookie } = makeFreshCookieFor(
+    ctx.db.getUserForAuthByUsername(otherUser.username)
+  );
+
+  // 他ユーザーへの強制ログアウト（POST revoke-sessions）
+  const revokeOtherRes = await fetch(`${origin}/board/api/admin/users/${otherUser.id}/revoke-sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: freshAdminCookie },
+    body: '{}',
+  });
+  assert.equal(revokeOtherRes.status, 200);
+  const revokeOtherJson = await revokeOtherRes.json();
+  assert.equal(revokeOtherJson.revokedSessions, 1);
+  assert.equal(revokeOtherJson.selfSessionRevoked, false);
+  const targetAfterRevokeMe = await fetch(`${origin}/api/auth/me`, { headers: { Cookie: targetCookie } });
+  assert.equal(targetAfterRevokeMe.status, 200);
+  assert.ok(targetAfterRevokeMe.headers.get('set-cookie')?.includes('Max-Age=0'));
+  assert.equal((await targetAfterRevokeMe.json()).user, null);
+  const targetAfterRevokePost = await fetch(`${origin}/api/posts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: targetCookie },
+    body: JSON.stringify({ thread_id: 1, content: '失効後投稿拒否', expect_auth: true, expected_user_id: otherUser.id }),
+  });
+  assert.equal(targetAfterRevokePost.status, 401);
+
+  // ボディ受信中のセッション失効が PATCH role と PUT permissions の両方を 401 SESSION_EXPIRED で阻止すること
+  const sendChunkedRevoked = (reqPath, method, bodyStart, bodyEnd, sessionCookie) =>
+    new Promise((resolve, reject) => {
+      const reqPromise = new Promise((resReq) => ctx.server.once('request', resReq));
+      const req = http.request(
+        `${origin}${reqPath}`,
+        {
+          method,
+          headers: {
+            'Content-Type': 'application/json',
+            Origin: origin,
+            Cookie: sessionCookie,
+            Connection: 'close',
+          },
+        },
+        (res) => {
+          let raw = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk) => { raw += chunk; });
+          res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(raw) }));
+        }
+      );
+      req.on('error', reject);
+      req.write(bodyStart);
+      reqPromise
+        .then(() => new Promise((r) => setTimeout(r, 10)))
+        .then(() => {
+          ctx.db.revokeAllSessionsByUsername(survivingAdmin.username);
+          req.end(bodyEnd);
+        })
+        .catch(reject);
+    });
+
+  const revokedChunkRole = await sendChunkedRevoked(
+    `/api/admin/users/${otherUser.id}/role`,
+    'PATCH',
+    '{"role":',
+    '"admin"}',
+    freshAdminCookie
+  );
+  assert.equal(revokedChunkRole.status, 401);
+  assert.equal(revokedChunkRole.body.code, 'SESSION_EXPIRED');
+  assert.equal(ctx.db.getUserForAuthByUsername(otherUser.username).role, 'user');
+
+  const { cookie: freshAdminCookie2, rawTok: rawTok2 } = makeFreshCookieFor(
+    ctx.db.getUserForAuthByUsername(survivingAdmin.username)
+  );
+  const revokedChunkPerm = await sendChunkedRevoked(
+    '/api/admin/permissions/guest',
+    'PUT',
+    '{"permissions":',
+    '{"create_post":false}}',
+    freshAdminCookie2
+  );
+  assert.equal(revokedChunkPerm.status, 401);
+  assert.equal(revokedChunkPerm.body.code, 'SESSION_EXPIRED');
+  assert.equal(ctx.db.getEffectivePermissionsForRole('guest').create_post, true);
+
+  // 自己強制ログアウト (selfSessionRevoked: true + Set-Cookie 削除)
+  const { cookie: freshAdminCookie3, rawTok: rawTok3 } = makeFreshCookieFor(
+    ctx.db.getUserForAuthByUsername(survivingAdmin.username)
+  );
+  const selfRevokeRes = await fetch(`${origin}/api/admin/users/${survivingAdmin.id}/revoke-sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: origin, Cookie: freshAdminCookie3 },
+    body: '{}',
+  });
+  assert.equal(selfRevokeRes.status, 200);
+  assert.ok(selfRevokeRes.headers.get('set-cookie')?.includes('Max-Age=0'));
+  assert.equal((await selfRevokeRes.json()).selfSessionRevoked, true);
+
+  // 4. 秘密情報非露出検査（管理API一覧・権限・監査ログ）
+  const { cookie: inspectCookie } = makeFreshCookieFor(
+    ctx.db.getUserForAuthByUsername(survivingAdmin.username)
+  );
+  for (const inspectPath of ['/api/admin/permissions', '/api/admin/users?limit=20', '/api/admin/audit-logs?limit=50']) {
+    const raw = await (await fetch(`${origin}${inspectPath}`, { headers: { Cookie: inspectCookie } })).text();
+    for (const secretSubstr of ['scrypt$', normalTokenHash, rawTok2, rawTok3]) {
+      assert.equal(raw.includes(secretSubstr), false, `${inspectPath} must not expose secrets`);
+    }
+  }
+});

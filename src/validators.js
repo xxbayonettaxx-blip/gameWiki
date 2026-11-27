@@ -434,12 +434,93 @@ function parsePaginationOffset(rawValue) {
   throw new ValidationError('開始位置(offset)は0以上の整数で指定してください。', 400);
 }
 
+// ---------------------------------------------------------------------
+// 12. Step 2（v1.2）ロール別権限設定の検証（未知キー・admin変更拒否）
+// ---------------------------------------------------------------------
+const EDITABLE_PERMISSION_ROLES = Object.freeze(['user', 'guest']);
+const PERMISSION_KEYS = Object.freeze(['create_post', 'create_thread', 'pin_post', 'upload_image']);
+const DEFAULT_ROLE_PERMISSIONS = Object.freeze({
+  admin: Object.freeze({
+    create_post: true,
+    create_thread: true,
+    pin_post: true,
+    upload_image: true,
+  }),
+  user: Object.freeze({
+    create_post: true,
+    create_thread: false,
+    pin_post: false,
+    upload_image: true,
+  }),
+  guest: Object.freeze({
+    create_post: true,
+    create_thread: false,
+    pin_post: false,
+    upload_image: false,
+  }),
+});
+
+function validatePermissionRole(rawRole) {
+  if (rawRole !== 'user' && rawRole !== 'guest') {
+    throw new ValidationError(
+      "権限編集の対象ロールは 'user' または 'guest' のみ指定できます（admin は常時全権限固定です）。",
+      400
+    );
+  }
+  return rawRole;
+}
+
+function validateRolePermissionsPayload(body) {
+  if (!isPlainObject(body)) {
+    throw new ValidationError('リクエスト形式が不正です（JSONオブジェクトが必要です）。', 400);
+  }
+  let source = body;
+  if ('permissions' in body) {
+    const extraKeys = Object.keys(body).filter((k) => k !== 'permissions');
+    if (extraKeys.length > 0) {
+      throw new ValidationError(
+        `permissions 以外に不正なキー（${extraKeys[0]}）が含まれています。`,
+        400,
+        'UNKNOWN_PERMISSION_KEY'
+      );
+    }
+    if (!isPlainObject(body.permissions)) {
+      throw new ValidationError('permissions にはオブジェクトを指定してください。', 400);
+    }
+    source = body.permissions;
+  }
+
+  const entries = Object.entries(source);
+  if (entries.length === 0) {
+    throw new ValidationError('更新する権限キー（create_post 等）を1つ以上指定してください。', 400);
+  }
+
+  const clean = {};
+  for (const [key, val] of entries) {
+    if (!PERMISSION_KEYS.includes(key)) {
+      throw new ValidationError(
+        `未定義の権限キー（${key}）は指定できません。`,
+        400,
+        'UNKNOWN_PERMISSION_KEY'
+      );
+    }
+    if (typeof val !== 'boolean') {
+      throw new ValidationError(`権限値（${key}）は true または false で指定してください。`, 400);
+    }
+    clean[key] = val;
+  }
+  return clean;
+}
+
 module.exports = {
   ValidationError,
   MIN_USERNAME_LENGTH,
   MAX_USERNAME_LENGTH,
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
+  EDITABLE_PERMISSION_ROLES,
+  PERMISSION_KEYS,
+  DEFAULT_ROLE_PERMISSIONS,
   countCodePoints,
   parsePositiveInt,
   validatePostInput,
@@ -451,6 +532,8 @@ module.exports = {
   validateUsername,
   validatePassword,
   validateUserRole,
+  validatePermissionRole,
+  validateRolePermissionsPayload,
   validateAuthRegisterInput,
   validateAuthLoginInput,
   validateChangePasswordInput,

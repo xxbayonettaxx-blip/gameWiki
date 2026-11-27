@@ -17,8 +17,13 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {
   ValidationError,
+  EDITABLE_PERMISSION_ROLES,
+  PERMISSION_KEYS,
   parsePositiveInt,
   validatePostInput,
+  validateUserRole,
+  validatePermissionRole,
+  validateRolePermissionsPayload,
   validateAuthRegisterInput,
   validateAuthLoginInput,
   validateChangePasswordInput,
@@ -631,6 +636,7 @@ function createApp(options = {}) {
         const sess = resolveRequestSession(req, nowIso);
         const extraHeaders = sess.status === 'invalid' ? buildClearCookieHeaders() : {};
         const user = sess.status === 'valid' ? sess.auth.user : null;
+        const permissions = db.getEffectivePermissionsForRole(user ? user.role : 'guest');
 
         const categories = db.listCategoriesWithThreads();
         let targetThreadId = null;
@@ -651,7 +657,7 @@ function createApp(options = {}) {
           }
         }
         const initialThread = targetThreadId !== null ? db.getThreadDetail(targetThreadId) : null;
-        sendJson(res, 200, { user, categories, initialThread }, extraHeaders);
+        sendJson(res, 200, { user, permissions, categories, initialThread }, extraHeaders);
         return;
       }
 
@@ -693,11 +699,13 @@ function createApp(options = {}) {
         const nowIso = nowDate.toISOString();
         purgeExpiredSessionsIfDue(nowDate.getTime(), nowIso);
         const sess = resolveRequestSession(req, nowIso);
+        const user = sess.status === 'valid' ? sess.auth.user : null;
+        const permissions = db.getEffectivePermissionsForRole(user ? user.role : 'guest');
         if (sess.status === 'invalid') {
-          sendJson(res, 200, { user: null }, buildClearCookieHeaders());
+          sendJson(res, 200, { user: null, permissions }, buildClearCookieHeaders());
           return;
         }
-        sendJson(res, 200, { user: sess.status === 'valid' ? sess.auth.user : null });
+        sendJson(res, 200, { user, permissions });
         return;
       }
 
@@ -751,7 +759,10 @@ function createApp(options = {}) {
         sendJson(
           res,
           201,
-          { user },
+          {
+            user,
+            permissions: db.getEffectivePermissionsForRole(user.role),
+          },
           {
             'Set-Cookie': buildSetSessionCookieHeader(rawToken, {
               devInsecureCookie: allowDevInsecureCookie,
@@ -847,7 +858,10 @@ function createApp(options = {}) {
         sendJson(
           res,
           200,
-          { user: issued.user },
+          {
+            user: issued.user,
+            permissions: db.getEffectivePermissionsForRole(issued.user.role),
+          },
           {
             'Set-Cookie': buildSetSessionCookieHeader(rawToken, {
               devInsecureCookie: allowDevInsecureCookie,
@@ -872,7 +886,15 @@ function createApp(options = {}) {
           db.deleteSessionByTokenHash(hashSessionToken(cookieState.token));
         }
 
-        sendJson(res, 200, { ok: true }, buildClearCookieHeaders());
+        sendJson(
+          res,
+          200,
+          {
+            ok: true,
+            permissions: db.getEffectivePermissionsForRole('guest'),
+          },
+          buildClearCookieHeaders()
+        );
         return;
       }
 
@@ -959,7 +981,12 @@ function createApp(options = {}) {
         }
 
         authMetrics.passwordChanged += 1;
-        sendJson(res, 200, { ok: true }, buildClearCookieHeaders());
+        sendJson(
+          res,
+          200,
+          { ok: true, permissions: db.getEffectivePermissionsForRole('guest') },
+          buildClearCookieHeaders()
+        );
         return;
       }
 
@@ -1052,6 +1079,7 @@ function createApp(options = {}) {
             error: mismatchMessage,
             code: 'AUTH_USER_MISMATCH',
             currentUser,
+            permissions: db.getEffectivePermissionsForRole(currentUser.role),
           });
           return;
         }
@@ -1061,6 +1089,20 @@ function createApp(options = {}) {
           sendJson(res, 403, {
             error: '仮パスワードのままでは投稿できません。先にパスワードを変更してください。',
             code: 'PASSWORD_CHANGE_REQUIRED',
+          });
+          return;
+        }
+
+        // Step 2: ロール別の投稿権限（role_permissions.create_post）を強制検査
+        const effectiveRole = sess.status === 'valid' ? sess.auth.user.role : 'guest';
+        const effectivePerms = db.getEffectivePermissionsForRole(effectiveRole);
+        if (!effectivePerms.create_post) {
+          sendJson(res, 403, {
+            error:
+              effectiveRole === 'guest'
+                ? '現在、未ログイン状態での新規投稿は停止されています。ログインしてから投稿してください。'
+                : '現在、一般会員による新規投稿は管理者により制限されています。',
+            code: 'PERMISSION_DENIED',
           });
           return;
         }
@@ -1080,6 +1122,7 @@ function createApp(options = {}) {
           visitorId,
           content: validInput.content,
           createdBy: isMemberPost ? sess.auth.user.id : null,
+          enforceRole: effectiveRole,
         });
 
         sendJson(res, 201, { post: createdPost });
@@ -1397,6 +1440,123 @@ function createApp(options = {}) {
           deletedThread: result.deletedThread,
           deletedPostsCount: result.deletedPostsCount,
         });
+        return;
+      }
+
+      // [GET] 管理者専用：ロール別権限設定一覧取得（Step 2）
+      if (pathname === '/api/admin/permissions') {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'GET' });
+          return;
+        }
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+        sendJson(res, 200, {
+          permissions: db.getAllRolePermissions(),
+          keys: PERMISSION_KEYS,
+          editableRoles: EDITABLE_PERMISSION_ROLES,
+        });
+        return;
+      }
+
+      // [PUT] 管理者専用：user / guest の権限設定更新（admin は400拒否、未知キー拒否、同一TX監査）
+      const adminPermRoleMatch = pathname.match(/^\/api\/admin\/permissions\/([^/]+)$/);
+      if (adminPermRoleMatch) {
+        if (req.method !== 'PUT') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'PUT' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+
+        const targetRole = validatePermissionRole(adminPermRoleMatch[1]);
+        const body = ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
+        const cleanPatch = validateRolePermissionsPayload(body);
+        const result = db.updateRolePermissions({
+          role: targetRole,
+          permissions: cleanPatch,
+          adminAuth: adminCtx.buildTxAuth(),
+        });
+        sendJson(res, 200, {
+          ok: true,
+          role: result.role,
+          permissions: result.permissions,
+          unchanged: result.unchanged,
+          allPermissions: db.getAllRolePermissions(),
+        });
+        return;
+      }
+
+      // [PATCH] 管理者専用：会員ロール変更（最後の管理者409保護・受信中再認可・同一TX監査・セッション強制失効）
+      const adminUserRoleMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/role$/);
+      if (adminUserRoleMatch) {
+        if (req.method !== 'PATCH') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'PATCH' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+
+        const userId = parsePositiveInt(adminUserRoleMatch[1], 'ユーザーID');
+        const body = ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
+        const nextRole = validateUserRole(body.role);
+        const result = db.setUserRoleById({
+          userId,
+          role: nextRole,
+          adminAuth: adminCtx.buildTxAuth(),
+        });
+        if (!result.found) {
+          sendJson(res, 404, { error: '指定されたユーザーが見つかりません。' });
+          return;
+        }
+        const selfSessionRevoked = Boolean(result.selfAffected && !result.unchanged);
+        sendJson(
+          res,
+          200,
+          {
+            ok: true,
+            user: result.user,
+            unchanged: result.unchanged,
+            revokedSessions: result.revokedSessions,
+            selfSessionRevoked,
+          },
+          selfSessionRevoked ? buildClearCookieHeaders() : {}
+        );
+        return;
+      }
+
+      // [POST] 管理者専用：特定ユーザーの全セッション強制失効（auth_version加算＋同一TX監査）
+      const adminUserRevokeMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/revoke-sessions$/);
+      if (adminUserRevokeMatch) {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'Method Not Allowed' }, { Allow: 'POST' });
+          return;
+        }
+        checkMutatingHeaders(req, { requireOrigin: true });
+        const adminCtx = requireAdminSession(req, res, nowFn().toISOString());
+        if (!adminCtx) return;
+
+        const userId = parsePositiveInt(adminUserRevokeMatch[1], 'ユーザーID');
+        ensurePlainBodyObject(await readJsonBody(req, maxBodyBytes));
+        const result = db.revokeAllSessionsByUserId(userId, { adminAuth: adminCtx.buildTxAuth() });
+        if (!result.found) {
+          sendJson(res, 404, { error: '指定されたユーザーが見つかりません。' });
+          return;
+        }
+        const selfSessionRevoked = Boolean(result.selfAffected);
+        sendJson(
+          res,
+          200,
+          {
+            ok: true,
+            user: result.user,
+            revokedSessions: result.revokedSessions,
+            selfSessionRevoked,
+          },
+          selfSessionRevoked ? buildClearCookieHeaders() : {}
+        );
         return;
       }
 

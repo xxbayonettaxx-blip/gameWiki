@@ -17,10 +17,14 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const {
   ValidationError,
+  PERMISSION_KEYS,
+  DEFAULT_ROLE_PERMISSIONS,
   parsePositiveInt,
   validatePostInput,
   validateUsername,
   validateUserRole,
+  validatePermissionRole,
+  validateRolePermissionsPayload,
   validateCategoryName,
   validateThreadTitle,
   validateThreadPinnedText,
@@ -32,7 +36,7 @@ const {
 // プロジェクトルートおよびスキーマ正本のパス（カレントディレクトリに依存しない __dirname 基準）
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_SCHEMA_PATH = path.join(__dirname, 'schema.sql');
-const TARGET_SCHEMA_VERSION = 3;
+const TARGET_SCHEMA_VERSION = 4;
 
 // 1スレッドあたりの保存・取得上限と返信階層の深さ上限（見えない投稿の蓄積とネストDoSを防止）
 const DEFAULT_MAX_POSTS_PER_THREAD = 500;
@@ -190,6 +194,19 @@ function createBoardDb(options = {}) {
           if (threadColumns.length > 0 && !threadColumns.some((col) => col.name === 'created_by')) {
             sqlite.exec('ALTER TABLE threads ADD COLUMN created_by INTEGER REFERENCES users(id) ON DELETE SET NULL;');
           }
+
+          // Step 2 (v1.2): 既定ロール権限の冪等初期シード（既存カスタマイズ値を上書きしないため INSERT OR IGNORE 固定）
+          sqlite.exec(`
+            INSERT OR IGNORE INTO role_permissions (role, permission_key, allowed) VALUES
+              ('user',  'create_post',   1),
+              ('user',  'create_thread', 0),
+              ('user',  'pin_post',      0),
+              ('user',  'upload_image',  1),
+              ('guest', 'create_post',   1),
+              ('guest', 'create_thread', 0),
+              ('guest', 'pin_post',      0),
+              ('guest', 'upload_image',  0);
+          `);
 
           sqlite.exec(`PRAGMA user_version = ${TARGET_SCHEMA_VERSION};`);
         }
@@ -574,6 +591,20 @@ function createBoardDb(options = {}) {
         SET auth_version = auth_version + 1
         WHERE id = ?
       `),
+
+      listPermissionsByRole: sqlite.prepare(`
+        SELECT permission_key, allowed
+        FROM role_permissions
+        WHERE role = ?
+      `),
+
+      upsertRolePermission: sqlite.prepare(`
+        INSERT INTO role_permissions (role, permission_key, allowed, updated_at)
+        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        ON CONFLICT(role, permission_key) DO UPDATE SET
+          allowed = excluded.allowed,
+          updated_at = excluded.updated_at
+      `),
     };
 
     // node:sqlite が返す null prototype オブジェクトを通常のプレーンオブジェクトへ変換する補助関数
@@ -756,6 +787,97 @@ function createBoardDb(options = {}) {
       );
     }
 
+    function readRolePermissionsMap(role) {
+      if (role === 'admin') {
+        return { ...DEFAULT_ROLE_PERMISSIONS.admin };
+      }
+      const cleanRole = validatePermissionRole(role);
+      const result = { ...DEFAULT_ROLE_PERMISSIONS[cleanRole] };
+      for (const row of stmts.listPermissionsByRole.all(cleanRole)) {
+        if (PERMISSION_KEYS.includes(row.permission_key)) {
+          result[row.permission_key] = Boolean(row.allowed);
+        }
+      }
+      return result;
+    }
+
+    function applyUserRoleChangeInTx(actor, user, cleanRole) {
+      if (!user) {
+        return { found: false, unchanged: false, revokedSessions: 0, user: null, selfAffected: false };
+      }
+      const selfAffected = Boolean(actor && actor.actorUserId === Number(user.id));
+      // R2: CLI・Web管理共用の最後の管理者保護（降格後の admin が 0 人になる操作を拒否）
+      if (user.role === 'admin' && cleanRole !== 'admin') {
+        const { cnt } = stmts.countAdminUsers.get();
+        if (Number(cnt) <= 1) {
+          throw new ValidationError(
+            '最後の管理者（admin）を一般会員へ降格することはできません。',
+            409,
+            'LAST_ADMIN_PROTECTED'
+          );
+        }
+      }
+      if (user.role === cleanRole) {
+        return {
+          found: true,
+          unchanged: true,
+          revokedSessions: 0,
+          user: toPublicUser(user),
+          selfAffected,
+        };
+      }
+      stmts.updateRoleAndBumpVersion.run(cleanRole, user.id);
+      const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
+      const revokedSessions = Number(deletedInfo.changes ?? 0);
+      const updated = stmts.getUserById.get(user.id);
+      recordAuditInTx(actor, {
+        action: 'user_role_change',
+        targetType: 'user',
+        targetId: String(user.id),
+        detail: {
+          username: user.username,
+          beforeRole: user.role,
+          afterRole: cleanRole,
+          revokedSessions,
+          selfChange: selfAffected,
+        },
+      });
+      return {
+        found: true,
+        unchanged: false,
+        revokedSessions,
+        user: toPublicUser(updated),
+        selfAffected,
+      };
+    }
+
+    function applyRevokeUserSessionsInTx(actor, user) {
+      if (!user) {
+        return { found: false, revokedSessions: 0, user: null, selfAffected: false };
+      }
+      const selfAffected = Boolean(actor && actor.actorUserId === Number(user.id));
+      stmts.bumpUserAuthVersion.run(user.id);
+      const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
+      const revokedSessions = Number(deletedInfo.changes ?? 0);
+      const updated = stmts.getUserById.get(user.id);
+      recordAuditInTx(actor, {
+        action: 'user_revoke_sessions',
+        targetType: 'user',
+        targetId: String(user.id),
+        detail: {
+          username: user.username,
+          revokedSessions,
+          selfRevoke: selfAffected,
+        },
+      });
+      return {
+        found: true,
+        revokedSessions,
+        user: toPublicUser(updated),
+        selfAffected,
+      };
+    }
+
     // -----------------------------------------------------------------
     // 4. 外部へ公開する操作メソッド群
     // -----------------------------------------------------------------
@@ -810,9 +932,23 @@ function createBoardDb(options = {}) {
         };
       },
 
-      // 新規投稿または返信の登録（トランザクション内で整合性・件数上限・階層上限を検査）
-      createPost({ threadId, parentId = null, authorName, visitorId, content, createdBy = null }) {
+      // 新規投稿または返信の登録（トランザクション内で権限・整合性・件数上限・階層上限を検査）
+      createPost({ threadId, parentId = null, authorName, visitorId, content, createdBy = null, enforceRole = null }) {
         return runInTransaction(() => {
+          // 0. Step 2: 書き込み確定時点でロールの投稿権限を再確認（TX外変更との競合を防止）
+          if (enforceRole !== null && enforceRole !== undefined) {
+            const perms = readRolePermissionsMap(enforceRole);
+            if (!perms.create_post) {
+              throw new ValidationError(
+                enforceRole === 'guest'
+                  ? '現在、未ログイン状態での新規投稿は停止されています。ログインしてから投稿してください。'
+                  : '現在、一般会員による新規投稿は管理者により制限されています。',
+                403,
+                'PERMISSION_DENIED'
+              );
+            }
+          }
+
           // ① 投稿先スレッドの実在確認
           const thread = stmts.getThreadById.get(threadId);
           if (!thread) {
@@ -1721,48 +1857,17 @@ function createBoardDb(options = {}) {
         return runInTransaction(() => {
           const actor = resolveAuditActorInTx(adminAuth, audit);
           const user = stmts.getUserByUsername.get(cleanUsername);
-          if (!user) {
-            return { found: false, user: null };
-          }
-          // R2: CLI・Web管理共用の最後の管理者保護（降格後の admin が 0 人になる操作を拒否）
-          if (user.role === 'admin' && cleanRole !== 'admin') {
-            const { cnt } = stmts.countAdminUsers.get();
-            if (Number(cnt) <= 1) {
-              throw new ValidationError(
-                '最後の管理者（admin）を一般会員へ降格することはできません。',
-                409,
-                'LAST_ADMIN_PROTECTED'
-              );
-            }
-          }
-          if (user.role === cleanRole) {
-            return {
-              found: true,
-              unchanged: true,
-              revokedSessions: 0,
-              user: toPublicUser(user),
-            };
-          }
-          stmts.updateRoleAndBumpVersion.run(cleanRole, user.id);
-          const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
-          const updated = stmts.getUserById.get(user.id);
-          recordAuditInTx(actor, {
-            action: 'user_role_change',
-            targetType: 'user',
-            targetId: String(user.id),
-            detail: {
-              username: user.username,
-              beforeRole: user.role,
-              afterRole: cleanRole,
-              revokedSessions: Number(deletedInfo.changes ?? 0),
-            },
-          });
-          return {
-            found: true,
-            unchanged: false,
-            revokedSessions: Number(deletedInfo.changes ?? 0),
-            user: toPublicUser(updated),
-          };
+          return applyUserRoleChangeInTx(actor, user, cleanRole);
+        });
+      },
+
+      setUserRoleById({ userId, role, adminAuth = null, audit = null }) {
+        const cleanUserId = parsePositiveInt(userId, 'ユーザーID');
+        const cleanRole = validateUserRole(role);
+        return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
+          const user = stmts.getUserById.get(cleanUserId);
+          return applyUserRoleChangeInTx(actor, user, cleanRole);
         });
       },
 
@@ -1771,25 +1876,71 @@ function createBoardDb(options = {}) {
         return runInTransaction(() => {
           const actor = resolveAuditActorInTx(adminAuth, audit);
           const user = stmts.getUserByUsername.get(cleanUsername);
-          if (!user) {
-            return { found: false, revokedSessions: 0, user: null };
+          return applyRevokeUserSessionsInTx(actor, user);
+        });
+      },
+
+      revokeAllSessionsByUserId(userId, { adminAuth = null, audit = null } = {}) {
+        const cleanUserId = parsePositiveInt(userId, 'ユーザーID');
+        return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
+          const user = stmts.getUserById.get(cleanUserId);
+          return applyRevokeUserSessionsInTx(actor, user);
+        });
+      },
+
+      getEffectivePermissionsForRole(role) {
+        return readRolePermissionsMap(role === 'admin' ? 'admin' : role === 'user' ? 'user' : 'guest');
+      },
+
+      getAllRolePermissions() {
+        return {
+          admin: readRolePermissionsMap('admin'),
+          user: readRolePermissionsMap('user'),
+          guest: readRolePermissionsMap('guest'),
+        };
+      },
+
+      updateRolePermissions({ role, permissions, adminAuth = null, audit = null }) {
+        const cleanRole = validatePermissionRole(role);
+        const patch = validateRolePermissionsPayload(permissions);
+        return runInTransaction(() => {
+          const actor = resolveAuditActorInTx(adminAuth, audit);
+          const before = readRolePermissionsMap(cleanRole);
+          const changedKeys = [];
+          for (const [key, nextVal] of Object.entries(patch)) {
+            if (before[key] !== nextVal) {
+              changedKeys.push(key);
+            }
           }
-          stmts.bumpUserAuthVersion.run(user.id);
-          const deletedInfo = stmts.deleteAllSessionsForUser.run(user.id);
-          const updated = stmts.getUserById.get(user.id);
+          if (changedKeys.length === 0) {
+            return {
+              role: cleanRole,
+              permissions: before,
+              unchanged: true,
+              changedKeys: [],
+            };
+          }
+          for (const key of changedKeys) {
+            stmts.upsertRolePermission.run(cleanRole, key, patch[key] ? 1 : 0);
+          }
+          const after = readRolePermissionsMap(cleanRole);
           recordAuditInTx(actor, {
-            action: 'user_revoke_sessions',
-            targetType: 'user',
-            targetId: String(user.id),
+            action: 'role_permissions_update',
+            targetType: 'role',
+            targetId: cleanRole,
             detail: {
-              username: user.username,
-              revokedSessions: Number(deletedInfo.changes ?? 0),
+              role: cleanRole,
+              before,
+              after,
+              changedKeys,
             },
           });
           return {
-            found: true,
-            revokedSessions: Number(deletedInfo.changes ?? 0),
-            user: toPublicUser(updated),
+            role: cleanRole,
+            permissions: after,
+            unchanged: false,
+            changedKeys,
           };
         });
       },

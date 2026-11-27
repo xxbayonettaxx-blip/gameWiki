@@ -1124,7 +1124,7 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     await waitFor("!document.querySelector('#auth-sheet').classList.contains('is-open')");
   });
 
-  await t.test('レビュー回帰(R1): 古いbootstrap応答が登録・ログアウト後の認証表示を上書きしないこと・版表示v1.1.0確認', async () => {
+  await t.test('レビュー回帰(R1): 古いbootstrap応答が登録・ログアウト後の認証表示を上書きしないこと・版表示v1.2.0確認', async () => {
     const setField = async (selector, value) => {
       await evaluate(
         `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
@@ -1190,15 +1190,15 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'ログイン');
     assert.equal(await evaluate("fetch('api/auth/me').then((r) => r.json()).then((d) => d.user)"), null);
 
-    // 3. 版表示が v1.1.0 に統一され v1.0.1 / v0.5 が残っていないこと
+    // 3. 版表示が v1.2.0 に統一され v1.1.0 / v1.0.1 / v0.5 が残っていないこと
     const versionText = await evaluate(`({
       sidebar: document.querySelector('.sidebar-bottom')?.textContent || '',
       footer: document.querySelector('.page-footer')?.textContent || '',
       badge: document.querySelector('.footer-version')?.textContent || '',
     })`);
-    assert.ok(versionText.sidebar.includes('v1.1.0') && !versionText.sidebar.includes('v1.0.1') && !versionText.sidebar.includes('v0.5'), JSON.stringify(versionText));
-    assert.ok(versionText.footer.includes('v1.1.0') && !versionText.footer.includes('v1.0.1') && !versionText.footer.includes('v0.5'), JSON.stringify(versionText));
-    assert.ok(versionText.badge.includes('v1.1.0') && !versionText.badge.includes('v1.0.1') && !versionText.badge.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.sidebar.includes('v1.2.0') && !versionText.sidebar.includes('v1.1.0') && !versionText.sidebar.includes('v1.0.1') && !versionText.sidebar.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.footer.includes('v1.2.0') && !versionText.footer.includes('v1.1.0') && !versionText.footer.includes('v1.0.1') && !versionText.footer.includes('v0.5'), JSON.stringify(versionText));
+    assert.ok(versionText.badge.includes('v1.2.0') && !versionText.badge.includes('v1.1.0') && !versionText.badge.includes('v1.0.1') && !versionText.badge.includes('v0.5'), JSON.stringify(versionText));
   });
 
   await t.test('実機回帰(ID14): 別タブログアウトでCookie消失後の送信が暗黙匿名化されず下書き保持→再ログイン継続できること', async () => {
@@ -2579,6 +2579,160 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
           audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
         });
       }
+    }
+  });
+
+  await t.test('v1.2 ロール・権限管理(Browser E2E): ロール変更・最後の管理者409・強制ログアウト・権限設定・一般画面投稿制限・320px', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+    const originUrl = url.replace(/\/board\/$/, '');
+
+    // 一般会員テストユーザーを作成（登録時セッション1件あり）
+    const regMemberRes = await fetch(`${originUrl}/board/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: originUrl },
+      body: JSON.stringify({ username: 'v12_e2e_member', password: 'v12-member-pass-123' }),
+    });
+    assert.equal(regMemberRes.status, 201);
+    const v12Member = (await regMemberRes.json()).user;
+    const soleAdmin = db.getUserForAuthByUsername('race_reg_user');
+    assert.ok(soleAdmin);
+
+    try {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+      await send('Page.navigate', { url: url + 'admin.html' });
+      await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+      assert.equal(await evaluate("document.querySelectorAll('#navigation .nav-btn').length"), 5);
+
+      await click('#nav-btn-members');
+      await waitFor(
+        "document.querySelector('#nav-btn-members')?.getAttribute('aria-selected') === 'true' && Boolean(document.querySelector('#save-perms-guest-btn')) && document.querySelector('#users-table-body')?.textContent.includes('v12_e2e_member')"
+      );
+
+      // 320px 狭幅でも会員タブが横はみ出ししないこと
+      await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 800, deviceScaleFactor: 1, mobile: true });
+      const membersNarrow = await evaluate('({ clientW: document.documentElement.clientWidth, scrollW: document.documentElement.scrollWidth })');
+      assert.ok(membersNarrow.scrollW <= membersNarrow.clientW, JSON.stringify(membersNarrow));
+      await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+      // 最後の管理者降格 → 409 ダイアログ内エラー表示
+      await click(`[data-action="change-user-role"][data-user-id="${soleAdmin.id}"]`);
+      await waitFor("document.querySelector('#editor').open === true && document.querySelector('#editor').textContent.includes('最後の管理者')");
+      await click('#dialog-submit');
+      await waitFor("document.querySelector('#dialog-error')?.textContent.includes('最後の管理者')");
+      assert.equal(await evaluate("document.querySelector('#editor').open"), true);
+      await click('#dialog-cancel-btn');
+      await waitFor("document.querySelector('#editor').open === false");
+
+      // v12_e2e_member を admin へ昇格（セッション 1 -> 0 件）→ 再度 user へ降格
+      await click(`[data-action="change-user-role"][data-user-id="${v12Member.id}"]`);
+      await waitFor("document.querySelector('#editor').open === true");
+      await click('#dialog-submit');
+      await waitFor(
+        `document.querySelector('#editor').open === false && (() => { const row = document.querySelector('[data-action="change-user-role"][data-user-id="${v12Member.id}"]')?.closest('tr'); return row && row.textContent.includes('管理者 (admin)') && row.textContent.includes('0 件'); })()`
+      );
+
+      await click(`[data-action="change-user-role"][data-user-id="${v12Member.id}"]`);
+      await waitFor("document.querySelector('#editor').open === true");
+      await click('#dialog-submit');
+      await waitFor(
+        `document.querySelector('#editor').open === false && (() => { const row = document.querySelector('[data-action="change-user-role"][data-user-id="${v12Member.id}"]')?.closest('tr'); return row && row.textContent.includes('一般会員 (user)'); })()`
+      );
+
+      // v12_e2e_member を再ログインさせてアクティブセッションを作り、管理画面から強制ログアウト
+      const loginMemberRes = await fetch(`${originUrl}/board/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: originUrl },
+        body: JSON.stringify({ username: 'v12_e2e_member', password: 'v12-member-pass-123' }),
+      });
+      assert.equal(loginMemberRes.status, 200);
+      await click('#admin-reload-all');
+      await waitFor(
+        `(() => { const row = document.querySelector('[data-action="revoke-user-sessions"][data-user-id="${v12Member.id}"]')?.closest('tr'); return Boolean(row && row.textContent.includes('1 件')); })()`
+      );
+      await click(`[data-action="revoke-user-sessions"][data-user-id="${v12Member.id}"]`);
+      await waitFor("document.querySelector('#editor').open === true");
+      await click('#dialog-submit');
+      await waitFor(
+        `document.querySelector('#editor').open === false && (() => { const row = document.querySelector('[data-action="revoke-user-sessions"][data-user-id="${v12Member.id}"]')?.closest('tr'); return Boolean(row && row.textContent.includes('0 件')); })()`
+      );
+
+      // guest の create_post を OFF 保存 → ページリロード後も保持されること
+      await evaluate(`(() => {
+        const cb = document.querySelector('input[data-perm-role="guest"][data-perm-key="create_post"]');
+        cb.checked = false;
+      })()`);
+      await click('#save-perms-guest-btn');
+      await waitFor("document.querySelector('#toast')?.textContent.includes('保存しました')");
+
+      await send('Page.navigate', { url: url + 'admin.html' });
+      await waitFor("!document.querySelector('#admin-workspace')?.hidden");
+      await click('#nav-btn-members');
+      await waitFor("Boolean(document.querySelector('input[data-perm-role=\"guest\"][data-perm-key=\"create_post\"]'))");
+      assert.equal(
+        await evaluate("document.querySelector('input[data-perm-role=\"guest\"][data-perm-key=\"create_post\"]').checked"),
+        false
+      );
+
+      // 監査ログに3種類の Step 2 操作が記録されていること
+      await click('#nav-btn-audit');
+      await waitFor("document.querySelector('#audit-list')?.textContent.includes('role_permissions_update')");
+      const v12AuditText = await evaluate("document.querySelector('#audit-list').textContent");
+      assert.ok(v12AuditText.includes('会員ロールを変更'), v12AuditText);
+      assert.ok(v12AuditText.includes('セッションを強制失効'), v12AuditText);
+      assert.ok(v12AuditText.includes('ロール権限を更新'), v12AuditText);
+
+      // 一般画面へ未ログイン(guest)として移動 → 管理資産 0 件・#composer-perm-box 表示・送信無効 → 会員ログインで即解除＆投稿成功
+      await send('Network.clearBrowserCookies');
+      await send('Page.navigate', { url: url + '#thread-1' });
+      await waitFor("document.querySelector('#thread-title')?.textContent === '雑談' && document.querySelector('#auth-open-label')?.textContent === 'ログイン'");
+
+      const leakedAdminAssets = await evaluate(
+        "performance.getEntriesByType('resource').map((e) => e.name).filter((n) => n.includes('admin.'))"
+      );
+      assert.deepEqual(leakedAdminAssets, []);
+
+      await click('#write-comment');
+      await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+      const guestComposerState = await evaluate(`({
+        permHidden: document.querySelector('#composer-perm-box').hidden,
+        permMsg: document.querySelector('#composer-perm-message').textContent,
+        submitDisabled: document.querySelector('#submit-button').disabled,
+      })`);
+      assert.equal(guestComposerState.permHidden, false);
+      assert.ok(guestComposerState.permMsg.includes('未ログイン'), JSON.stringify(guestComposerState));
+      assert.equal(guestComposerState.submitDisabled, true);
+
+      await click('#composer-close');
+      await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open')");
+
+      // リロードなしで user ログイン → composer 権限解除＆投稿成功
+      await click('#auth-open');
+      await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+      await setField('#login-username', 'v12_e2e_member');
+      await setField('#login-password', 'v12-member-pass-123');
+      await evaluate("document.querySelector('#login-form').requestSubmit()");
+      await waitFor("document.querySelector('#auth-open-label')?.textContent === 'v12_e2e_member' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+      await click('#write-comment');
+      await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open')");
+      assert.equal(await evaluate("document.querySelector('#composer-perm-box').hidden"), true);
+      assert.equal(await evaluate("document.querySelector('#submit-button').disabled"), false);
+      await setField('#comment-body', 'v12一般画面権限解放後のE2E投稿');
+      await evaluate("document.querySelector('#comment-form').requestSubmit()");
+      await waitFor(
+        "!document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#comments')?.textContent.includes('v12一般画面権限解放後のE2E投稿')"
+      );
+    } finally {
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: true },
+        audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
+      });
     }
   });
 

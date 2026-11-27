@@ -1,6 +1,6 @@
 -- =====================================================================
--- basic_board v1.1 データベーススキーマ正本 (src/schema.sql)
--- 設計書 管理画面設計書・実装ロードマップ（第2.1版）PRAGMA user_version = 3 準拠
+-- basic_board v1.2 データベーススキーマ正本 (src/schema.sql)
+-- 設計書 管理画面設計書・実装ロードマップ（第2.1版）PRAGMA user_version = 4 準拠
 -- ※ 本ファイルは単一トランザクションで原子適用できるよう純粋なDDLのみを定義する。
 -- ※ 接続時PRAGMA（busy_timeout / journal_mode = WAL / foreign_keys = ON）は
 --    src/db.js 側でトランザクション外にて設定・検証する。
@@ -106,3 +106,14 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_admin_audit_created_at ON admin_audit_logs(created_at DESC, id DESC);
+
+-- 8. ロール別権限テーブル（v1.2 Step 2追加）
+-- ・一般会員（user）と未ログイン（guest）の権限を管理する（admin は常時全権限固定）
+-- ・冪等初期シードは src/db.js 側マイグレーションで INSERT OR IGNORE により投入する
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role TEXT NOT NULL CHECK(role IN ('user', 'guest')),
+    permission_key TEXT NOT NULL CHECK(permission_key IN ('create_post', 'create_thread', 'pin_post', 'upload_image')),
+    allowed INTEGER NOT NULL CHECK(allowed IN (0, 1)),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (role, permission_key)
+);

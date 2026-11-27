@@ -352,7 +352,7 @@
       </section>
 
       <div class="sidebar-bottom">
-        <span class="preview-dot" aria-hidden="true"></span>BOARD EDITION v1.1.0
+        <span class="preview-dot" aria-hidden="true"></span>BOARD EDITION v1.2.0
         <small>ツリー返信・管理MVP・会員認証対応</small>
       </div>
     </aside>
@@ -439,10 +439,10 @@
 
       <footer class="page-footer">
         <span>COMMUNITY <b>BOARD</b></span>
-        <p>誰もが読みやすく参加しやすい汎用掲示板（v1.1.0）</p>
+        <p>誰もが読みやすく参加しやすい汎用掲示板（v1.2.0）</p>
         <button type="button" class="footer-guide" id="footer-guide">使い方</button>
         <a class="footer-guide" href="privacy.html">プライバシーポリシー</a>
-        <span class="footer-version">EDITION v1.1.0</span>
+        <span class="footer-version">EDITION v1.2.0</span>
         <small class="footer-copy">© 2026 KoohiQK</small>
       </footer>
     </main>
@@ -504,6 +504,10 @@
       <div id="composer-must-change-box" class="composer-alert-box" role="alert" hidden>
         <p>仮パスワードでログイン中のため投稿できません。先にパスワードを変更してください。</p>
         <button type="button" id="composer-open-password-btn" class="button-secondary button-small">パスワード変更 / ログアウトを開く</button>
+      </div>
+
+      <div id="composer-perm-box" class="composer-alert-box" role="alert" hidden>
+        <p id="composer-perm-message"></p>
       </div>
 
       <div id="session-expired-box" class="composer-alert-box" role="alert" hidden>

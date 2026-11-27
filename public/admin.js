@@ -59,7 +59,20 @@
     user_reset_password: { label: '仮パスワードを設定', icon: 'settings', theme: 'sand' },
     user_role_change: { label: '会員ロールを変更', icon: 'users', theme: 'blue' },
     user_revoke_sessions: { label: 'セッションを強制失効', icon: 'settings', theme: 'sand' },
+    role_permissions_update: { label: 'ロール権限を更新', icon: 'settings', theme: 'blue' },
   };
+
+  const ROLE_PERMISSION_CARDS = [
+    { role: 'user', title: '一般会員 (user)', note: 'ログイン済みの通常アカウントに適用されます' },
+    { role: 'guest', title: '未ログイン / ゲスト (guest)', note: 'Basic認証内での未ログイン閲覧者に適用されます' },
+  ];
+
+  const PERMISSION_META = [
+    { key: 'create_post', label: '通常投稿・返信の作成', desc: '即座に一般画面と投稿APIへ反映されます' },
+    { key: 'create_thread', label: 'スレッドの新規作成', desc: 'Step 2時点は管理者限定（将来解放用の権限枠）' },
+    { key: 'pin_post', label: '投稿ツリーのピン留め', desc: 'Step 2時点は管理者限定（将来解放用の権限枠）' },
+    { key: 'upload_image', label: '画像のアップロード', desc: 'Step 3（画像投稿MVP）導入後に適用されます' },
+  ];
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -83,6 +96,8 @@
     users: [],
     usersTotal: 0,
     usersOffset: 0,
+    permissions: null,
+    pendingPermRoles: new Set(),
     auditLogs: [],
     auditHasMore: false,
     auditNextBeforeId: null,
@@ -298,6 +313,10 @@
     return state.categories.find((c) => c.id === Number(categoryId)) || null;
   }
 
+  function findUserById(userId) {
+    return state.users.find((u) => Number(u.id) === Number(userId)) || null;
+  }
+
   function findThreadById(threadId) {
     for (const cat of state.categories) {
       const found = (cat.threads || []).find((th) => th.id === Number(threadId));
@@ -329,6 +348,9 @@
     }
     if (action && node.dataset.postId) {
       return `[data-action="${action}"][data-post-id="${node.dataset.postId}"]`;
+    }
+    if (action && node.dataset.userId) {
+      return `[data-action="${action}"][data-user-id="${node.dataset.userId}"]`;
     }
     if (action) return `[data-action="${action}"]`;
     return null;
@@ -633,6 +655,12 @@
     else if (detail.name) parts.push(`「${detail.name}」`);
     else if (detail.afterName) parts.push(`「${detail.afterName}」`);
     else if (detail.username) parts.push(`@${detail.username}`);
+    if (detail.beforeRole && detail.afterRole) {
+      parts.push(`${detail.beforeRole} -> ${detail.afterRole}`);
+    }
+    if (Array.isArray(detail.changedKeys) && detail.changedKeys.length > 0) {
+      parts.push(`変更: ${detail.changedKeys.join(', ')}`);
+    }
     return parts.join(' · ');
   }
 
@@ -858,7 +886,7 @@
     if (state.users.length === 0) {
       const tr = el('tr');
       const td = el('td', '', '表示するユーザーがいません。');
-      td.colSpan = 6;
+      td.colSpan = 7;
       tr.append(td);
       tbody.append(tr);
       return;
@@ -866,6 +894,7 @@
 
     for (const u of state.users) {
       const tr = el('tr');
+      const isSelf = Boolean(state.user && Number(state.user.id) === Number(u.id));
       const roleTd = el('td');
       roleTd.append(
         el(
@@ -874,29 +903,118 @@
           u.role === 'admin' ? '管理者 (admin)' : '一般会員 (user)'
         )
       );
+
+      const actionsTd = el('td');
+      const actionsWrap = el('div', 'user-row-actions');
+      const isAdmin = u.role === 'admin';
+      const roleBtn = makeBtn(
+        isAdmin ? '一般会員へ降格' : '管理者にする',
+        'change-user-role',
+        null,
+        isAdmin ? 'danger btn-compact' : 'secondary btn-compact',
+        {
+          'data-user-id': u.id,
+          'aria-label': `${u.username} を${isAdmin ? '一般会員へ降格' : '管理者にする'}`,
+          title: isSelf && isAdmin ? '自分自身を降格すると即座にログアウトします（最後の1名は降格不可）' : '',
+        }
+      );
+      const revokeBtn = makeBtn(
+        '強制ログアウト',
+        'revoke-user-sessions',
+        null,
+        'secondary btn-compact',
+        {
+          'data-user-id': u.id,
+          'aria-label': `${u.username} を強制ログアウト`,
+          title: isSelf ? 'ご自身の現在のセッションも終了します' : '',
+        }
+      );
+      actionsWrap.append(roleBtn, revokeBtn);
+      actionsTd.append(actionsWrap);
+
       tr.append(
         el('td', '', String(u.id)),
         el('td', '', u.username),
         roleTd,
         el('td', '', u.mustChangePassword ? '要仮パスワード変更' : '有効'),
         el('td', '', `${u.activeSessions} 件`),
-        el('td', '', formatTime(u.createdAt))
+        el('td', '', formatTime(u.createdAt)),
+        actionsTd
       );
       tbody.append(tr);
     }
   }
 
+  function renderPermissionsSection() {
+    const grid = $('#permissions-grid');
+    if (!grid) return;
+    grid.replaceChildren();
+
+    if (!state.permissions) {
+      grid.append(el('p', 'blank', '権限設定を読み込み中...'));
+      return;
+    }
+
+    for (const cardMeta of ROLE_PERMISSION_CARDS) {
+      const role = cardMeta.role;
+      const rolePerms = state.permissions[role] || {};
+      const card = el('section', 'perm-card');
+      card.setAttribute('aria-labelledby', `perm-card-title-${role}`);
+
+      const cardHead = el('div', 'perm-card-head');
+      const h3 = el('h3', '', cardMeta.title);
+      h3.id = `perm-card-title-${role}`;
+      cardHead.append(h3, el('span', 'badge count', '編集可'));
+
+      const desc = el('p', 'dialog-muted-note', cardMeta.note);
+      const list = el('div', 'perm-list');
+
+      for (const perm of PERMISSION_META) {
+        const label = el('label', 'perm-toggle');
+        const cb = el('input');
+        cb.type = 'checkbox';
+        cb.dataset.permRole = role;
+        cb.dataset.permKey = perm.key;
+        cb.checked = Boolean(rolePerms[perm.key]);
+        const textWrap = el('span', 'perm-toggle-text');
+        textWrap.append(el('strong', '', perm.label), el('small', '', perm.desc));
+        label.append(cb, textWrap);
+        list.append(label);
+      }
+
+      const footer = el('div', 'perm-card-footer');
+      const isPending = state.pendingPermRoles.has(role);
+      const saveBtn = makeBtn(
+        isPending ? '保存中...' : '権限を保存',
+        'save-role-permissions',
+        null,
+        'primary btn-compact',
+        {
+          id: `save-perms-${role}-btn`,
+          'data-role': role,
+          disabled: isPending,
+        }
+      );
+      footer.append(saveBtn);
+
+      card.append(cardHead, desc, list, footer);
+      grid.append(card);
+    }
+  }
+
   function buildMembersPage() {
+    const wrap = el('div', 'members-stack');
+
     const panel = el('section', 'panel');
     panel.setAttribute('aria-labelledby', 'users-list-heading');
 
     const head = el('div', 'panel-head');
-    const left = el('div');
+    const left = el('div', 'panel-head-main');
     const h2 = el('h2', '', '登録ユーザー一覧');
     h2.id = 'users-list-heading';
     left.append(
       h2,
-      el('p', '', 'ロール変更の Web 操作は Step 2 で実装予定です。パスワード再発行は管理 CLI（moderate.js）で行います。')
+      el('p', '', '会員のロール変更（admin ⇔ user）と全セッション強制失効を行えます。パスワード再発行は管理 CLI（moderate.js）専用です。')
     );
     const totalMeta = el('span', 'badge count', `全 ${state.usersTotal} 件`);
     totalMeta.id = 'users-total-label';
@@ -906,7 +1024,7 @@
     const table = el('table', 'admin-table');
     const thead = el('thead');
     const headRow = el('tr');
-    for (const colLabel of ['ID', 'ユーザー名', 'ロール', '状態', '有効セッション', '登録日時']) {
+    for (const colLabel of ['ID', 'ユーザー名', 'ロール', '状態', '有効セッション', '登録日時', '操作']) {
       const th = el('th', '', colLabel);
       th.scope = 'col';
       headRow.append(th);
@@ -925,7 +1043,33 @@
     footer.append(prevBtn, info, nextBtn);
 
     panel.append(head, tableWrap, footer);
-    return panel;
+
+    const permsPanel = el('section', 'panel');
+    permsPanel.id = 'permissions-panel';
+    permsPanel.setAttribute('aria-labelledby', 'permissions-heading');
+
+    const permHead = el('div', 'panel-head');
+    const permLeft = el('div', 'panel-head-main');
+    const permH2 = el('h2', '', 'ロール別権限設定');
+    permH2.id = 'permissions-heading';
+    permLeft.append(
+      permH2,
+      el('p', '', '一般会員（user）と未ログイン（guest）の操作可否を切り替えます。')
+    );
+    permHead.append(permLeft);
+
+    const adminNote = el(
+      'p',
+      'perm-admin-note',
+      '管理者（admin）はすべての権限が常に ON 固定であり、この画面や API から変更できません。'
+    );
+    const grid = el('div', 'perm-grid');
+    grid.id = 'permissions-grid';
+
+    permsPanel.append(permHead, adminNote, grid);
+
+    wrap.append(panel, permsPanel);
+    return wrap;
   }
 
   function renderActivePage({ focusMain = false } = {}) {
@@ -956,10 +1100,11 @@
       renderModPosts();
     } else if (state.page === 'members') {
       pageRoot.append(
-        buildPageHeading('会員', '登録会員の表示名・ロール・セッション状態を確認します。'),
+        buildPageHeading('会員', '登録会員のロール・セッション管理とロール別権限を設定します。'),
         buildMembersPage()
       );
       renderUsersTable();
+      renderPermissionsSection();
     } else if (state.page === 'audit') {
       pageRoot.append(
         buildPageHeading('監査ログ', '管理操作と対象を時系列で確認します。'),
@@ -1075,6 +1220,12 @@
     renderUsersTable();
   }
 
+  async function loadPermissions() {
+    const data = await apiRequest('./api/admin/permissions');
+    state.permissions = data.permissions || null;
+    renderPermissionsSection();
+  }
+
   async function loadAuditLogs(append = false) {
     const query =
       append && state.auditNextBeforeId
@@ -1110,7 +1261,7 @@
       if (state.page === 'posts' && state.selectedModThreadId) {
         await loadModThreadPosts(state.selectedModThreadId);
       } else if (state.page === 'members') {
-        await loadUsers(state.usersOffset);
+        await Promise.all([loadUsers(state.usersOffset), loadPermissions()]);
       } else if (state.page === 'audit') {
         await loadAuditLogs(false);
       }
@@ -1131,7 +1282,7 @@
     if (state.page === 'posts' && state.selectedModThreadId) {
       await loadModThreadPosts(state.selectedModThreadId);
     } else if (state.page === 'members') {
-      await loadUsers(state.usersOffset);
+      await Promise.all([loadUsers(state.usersOffset), loadPermissions()]);
     } else if (state.page === 'audit') {
       await loadAuditLogs(false);
     }
@@ -1215,10 +1366,12 @@
     }
   }
 
-  function buildEditorActionKey(action, { categoryId = null, threadId = null, postId = null } = {}) {
+  function buildEditorActionKey(action, { categoryId = null, threadId = null, postId = null, userId = null } = {}) {
     if (action === 'edit-category' && categoryId) return `edit-category:${categoryId}`;
     if (action === 'edit-thread' && threadId) return `edit-thread:${threadId}`;
     if (action === 'hide-post' && postId) return `hide-post:${postId}`;
+    if (action === 'change-user-role' && userId) return `change-user-role:${userId}`;
+    if (action === 'revoke-user-sessions' && userId) return `revoke-user-sessions:${userId}`;
     return action;
   }
 
@@ -1226,21 +1379,34 @@
     const categoryId = triggerEl?.dataset?.categoryId ? Number(triggerEl.dataset.categoryId) : null;
     const threadId = triggerEl?.dataset?.threadId ? Number(triggerEl.dataset.threadId) : null;
     const postId = triggerEl?.dataset?.postId ? Number(triggerEl.dataset.postId) : null;
+    const userId = triggerEl?.dataset?.userId ? Number(triggerEl.dataset.userId) : null;
 
     const category = categoryId ? findCategoryById(categoryId) : null;
     const threadFound = threadId ? findThreadById(threadId) : null;
     const thread = threadFound?.thread || null;
+    const targetUser = userId ? findUserById(userId) : null;
 
     if (action === 'new-thread' && state.categories.length === 0) {
       showErrorBanner('先にカテゴリを1件以上作成してください。', true);
+      return;
+    }
+    if ((action === 'change-user-role' || action === 'revoke-user-sessions') && !targetUser) {
+      showErrorBanner('対象の会員情報が見つかりません。一覧を再読込してください。', true);
       return;
     }
 
     // 削除プレビュー取得中に編集ダイアログを開いた場合、遅延到着したプレビューが上に重なるのを防ぐ
     cancelPendingPurgePreview();
 
-    const submitLabel = action === 'hide-post' ? '非表示にする' : '保存';
-    const actionKey = buildEditorActionKey(action, { categoryId, threadId, postId });
+    const submitLabel =
+      action === 'hide-post'
+        ? '非表示にする'
+        : action === 'change-user-role'
+          ? (targetUser?.role === 'admin' ? '一般会員へ降格する' : '管理者へ昇格する')
+          : action === 'revoke-user-sessions'
+            ? '強制ログアウトを実行'
+            : '保存';
+    const actionKey = buildEditorActionKey(action, { categoryId, threadId, postId, userId });
     const priorPending = state.pendingEditorActions.has(actionKey);
     const token = ++state.editorDialogSeq;
     state.dialog = {
@@ -1250,6 +1416,7 @@
       categoryId,
       threadId,
       postId,
+      userId,
       submitting: false,
       submitLabel,
     };
@@ -1327,6 +1494,79 @@
         el('p', 'dialog-body-copy', post ? post.content : `投稿 #${postId}`),
         el('p', 'dialog-muted-note', '一般画面では本文・投稿者名が「削除されました」にマスクされ、返信ツリーは維持されます。')
       );
+      focusTarget = $('#dialog-cancel-btn');
+    } else if (action === 'change-user-role' && targetUser) {
+      const nextRole = targetUser.role === 'admin' ? 'user' : 'admin';
+      const isSelf = Boolean(state.user && Number(state.user.id) === Number(targetUser.id));
+      const isLastAdmin = targetUser.role === 'admin' && Number(state.summary?.adminsCount ?? 0) <= 1;
+      titleEl.textContent =
+        nextRole === 'admin'
+          ? `会員「${targetUser.username}」を管理者に昇格`
+          : `管理者「${targetUser.username}」を一般会員へ降格`;
+      submitBtn.className = nextRole === 'user' ? 'btn danger' : 'btn primary';
+
+      const roleInput = el('input');
+      roleInput.type = 'hidden';
+      roleInput.name = 'role';
+      roleInput.value = nextRole;
+      content.append(
+        roleInput,
+        el(
+          'p',
+          'dialog-body-copy',
+          `対象アカウント #${targetUser.id}「${targetUser.username}」のロールを「${targetUser.role === 'admin' ? '管理者 (admin)' : '一般会員 (user)'}」から「${nextRole === 'admin' ? '管理者 (admin)' : '一般会員 (user)'}」へ変更します。`
+        ),
+        el(
+          'p',
+          'dialog-muted-note',
+          'セキュリティ保護のため、ロール変更と同時に対象ユーザーの全ログインセッションを即時失効します。'
+        )
+      );
+      if (isSelf && nextRole === 'user') {
+        content.append(
+          el(
+            'p',
+            'form-error',
+            '※ ご自身を降格すると、この画面のログインセッションも即座に終了します。'
+          )
+        );
+      }
+      if (isLastAdmin) {
+        content.append(
+          el(
+            'p',
+            'dialog-muted-note',
+            '※ 現在管理者は 1 名のみのため、実行しても最後の管理者保護（409）により拒否されます。'
+          )
+        );
+      }
+      focusTarget = $('#dialog-cancel-btn');
+    } else if (action === 'revoke-user-sessions' && targetUser) {
+      const isSelf = Boolean(state.user && Number(state.user.id) === Number(targetUser.id));
+      titleEl.textContent = `会員「${targetUser.username}」を強制ログアウト`;
+      submitBtn.className = 'btn danger';
+
+      content.append(
+        el(
+          'p',
+          'dialog-body-copy',
+          `対象アカウント #${targetUser.id}「${targetUser.username}」（有効セッション ${targetUser.activeSessions} 件）の全端末ログイン状態を強制解除します。`
+        ),
+        el(
+          'p',
+          'dialog-muted-note',
+          'パスワードは維持されたまま認証世代が更新され、次回アクセス時は再ログインが必要になります。'
+        )
+      );
+      if (isSelf) {
+        content.append(
+          el(
+            'p',
+            'form-error',
+            '※ ご自身のアカウントを指定しているため、確定直後にこの管理画面セッションも終了します。'
+          )
+        );
+      }
       focusTarget = $('#dialog-cancel-btn');
     } else {
       titleEl.textContent = thread ? `スレッド #${thread.id} を編集` : '新規スレッド';
@@ -1422,7 +1662,7 @@
 
     const form = ev.currentTarget;
     const values = new FormData(form);
-    const { action, actionKey, categoryId, threadId, postId, submitLabel } = dlg;
+    const { action, actionKey, categoryId, threadId, postId, userId, submitLabel } = dlg;
     const savedTriggerSelector = state.triggerSelector;
     $('#dialog-error').textContent = '';
 
@@ -1450,6 +1690,7 @@
 
     let notifyMsg = '';
     let fallbackFocusSelector = savedTriggerSelector;
+    let selfSessionRevoked = false;
 
     try {
       if (action === 'hide-post') {
@@ -1459,6 +1700,23 @@
         });
         notifyMsg = `投稿 #${postId} を非表示（論理削除）にしました。`;
         fallbackFocusSelector = savedTriggerSelector || '#mod-thread-select';
+      } else if (action === 'change-user-role') {
+        const nextRole = String(values.get('role') || '');
+        const res = await apiRequest(`./api/admin/users/${userId}/role`, {
+          method: 'PATCH',
+          body: { role: nextRole },
+        });
+        selfSessionRevoked = Boolean(res.selfSessionRevoked);
+        notifyMsg = res.unchanged
+          ? `会員「${res.user.username}」はすでに ${res.user.role} です。`
+          : `会員「${res.user.username}」のロールを ${res.user.role} に変更し、セッション ${res.revokedSessions} 件を失効しました。`;
+      } else if (action === 'revoke-user-sessions') {
+        const res = await apiRequest(`./api/admin/users/${userId}/revoke-sessions`, {
+          method: 'POST',
+          body: {},
+        });
+        selfSessionRevoked = Boolean(res.selfSessionRevoked);
+        notifyMsg = `会員「${res.user.username}」のセッション ${res.revokedSessions} 件を強制失効しました。`;
       } else if (action === 'new-category') {
         const name = String(values.get('name') ?? '');
         const rawOrder = String(values.get('displayOrder') ?? '').trim();
@@ -1530,6 +1788,12 @@
     // 保存APIの完了処理とロック解放は、一覧再取得（refreshAfterMutation）より先に確定させる
     dlg.submitting = false;
     releaseLockIfOwner(state.pendingEditorActions, actionKey, dlg.token);
+    if (selfSessionRevoked) {
+      closeEditorDialog({ restoreFocus: false });
+      showAuthGate('ご自身のロール変更または強制ログアウトが完了したため、このセッションは終了しました。掲示板へ戻って再ログインしてください。');
+      if (notifyMsg) notify(notifyMsg);
+      return;
+    }
     if (!isSameActiveEditorDialog(dlg)) {
       if (isReopenedSameActionDialog() && !state.pendingEditorActions.has(actionKey)) {
         setEditorSubmitBusy(false, state.dialog.submitLabel);
@@ -1834,6 +2098,59 @@
     await refreshAfterMutation(`[data-action="toggle-pin-post"][data-post-id="${postId}"]`);
   }
 
+  async function handleSaveRolePermissions(role) {
+    if (role !== 'user' && role !== 'guest') return;
+    if (state.pendingPermRoles.has(role)) return;
+
+    const checkboxes = [...document.querySelectorAll(`input[type="checkbox"][data-perm-role="${role}"]`)];
+    if (checkboxes.length === 0) return;
+
+    const permissions = {};
+    for (const cb of checkboxes) {
+      if (cb.dataset.permKey) {
+        permissions[cb.dataset.permKey] = Boolean(cb.checked);
+      }
+    }
+
+    state.pendingPermRoles.add(role);
+    showErrorBanner('');
+    const btn = $(`#save-perms-${role}-btn`);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '保存中...';
+    }
+
+    let res;
+    try {
+      res = await apiRequest(`./api/admin/permissions/${role}`, {
+        method: 'PUT',
+        body: { permissions },
+      });
+    } catch (err) {
+      state.pendingPermRoles.delete(role);
+      const curBtn = $(`#save-perms-${role}-btn`);
+      if (curBtn) {
+        curBtn.disabled = false;
+        curBtn.textContent = '権限を保存';
+      }
+      showErrorBanner(err.message, !hasOpenModalDialog());
+      return;
+    }
+
+    state.pendingPermRoles.delete(role);
+    if (res?.allPermissions) {
+      state.permissions = res.allPermissions;
+    }
+    renderPermissionsSection();
+    const roleLabel = role === 'user' ? '一般会員 (user)' : '未ログイン (guest)';
+    notify(
+      res?.unchanged
+        ? `${roleLabel} の権限設定に変更はありませんでした。`
+        : `${roleLabel} の権限設定を保存しました。`
+    );
+    await refreshAfterMutation(`#save-perms-${role}-btn`);
+  }
+
   // -------------------------------------------------------------------
   // 8. イベント登録・キーボードナビゲーション・初期化
   // -------------------------------------------------------------------
@@ -2002,13 +2319,20 @@
         return;
       }
 
+      if (action === 'save-role-permissions') {
+        await handleSaveRolePermissions(control.dataset.role);
+        return;
+      }
+
       if (
         action === 'preferences' ||
         action === 'new-category' ||
         action === 'edit-category' ||
         action === 'new-thread' ||
         action === 'edit-thread' ||
-        action === 'hide-post'
+        action === 'hide-post' ||
+        action === 'change-user-role' ||
+        action === 'revoke-user-sessions'
       ) {
         openEditorDialog(action, control);
       }

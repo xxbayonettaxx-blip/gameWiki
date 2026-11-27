@@ -804,7 +804,7 @@ test('認証DB移行・トランザクション・世代検証(R1)・セッシ�
 
   db = createBoardDb({ dbPath: v05DbPath });
 
-  assert.equal(db.getStatus().schemaVersion, 3);
+  assert.equal(db.getStatus().schemaVersion, 4);
   const migratedPosts = db.getThreadDetail(1).posts;
   assert.equal(migratedPosts.length, 1);
   assert.equal(migratedPosts[0].content, '既存投稿を維持');
@@ -1027,7 +1027,7 @@ test('v1.1管理MVP(DB): v2→v3移行・監査失敗ロールバック・F1復�
     v2Raw.close();
 
     migrated = createBoardDb({ dbPath: v2Path });
-    assert.equal(migrated.getStatus().schemaVersion, 3);
+    assert.equal(migrated.getStatus().schemaVersion, 4);
     assert.equal(migrated.listCategoriesWithThreads()[0].threads[0].title, 'v2既存スレッド');
     assert.equal(migrated.getThreadDetail(1).posts.length, 2);
     migrated.close();
@@ -1035,7 +1035,7 @@ test('v1.1管理MVP(DB): v2→v3移行・監査失敗ロールバック・F1復�
 
     // 再起動（再オープン）でもデータ不変・冪等であること
     db = createBoardDb({ dbPath: v2Path });
-    assert.equal(db.getStatus().schemaVersion, 3);
+    assert.equal(db.getStatus().schemaVersion, 4);
     assert.equal(db.getThreadDetail(1).posts.length, 2);
 
     // 2. updateThread による pinned_text / is_pinned 更新・クリア・制御文字拒否
@@ -1404,21 +1404,348 @@ test('P1-2 & 配備前確認回帰: 最後の1カテゴリ削除409保護＋バ�
       undefined
     );
     assert.equal(
+      rawCheck.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'role_permissions'").get(),
+      undefined
+    );
+    assert.equal(
       rawCheck.prepare('SELECT content FROM posts WHERE id = 1').get().content,
       'ロールバック保護投稿'
     );
     rawCheck.close();
     rawCheck = null;
 
-    // 正常スキーマで開き直せば安全に v3 へ移行し、既存データも残ること
+    // 正常スキーマで開き直せば安全に v4 へ移行し、既存データも残ること
     cleanDb = createBoardDb({ dbPath: v2RollbackPath });
-    assert.equal(cleanDb.getStatus().schemaVersion, 3);
+    assert.equal(cleanDb.getStatus().schemaVersion, 4);
     assert.equal(cleanDb.getThreadDetail(1).posts[0].content, 'ロールバック保護投稿');
   } finally {
     try { db?.close(); } catch {}
     try { failDb?.close(); } catch {}
     try { rawCheck?.close(); } catch {}
     try { cleanDb?.close(); } catch {}
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('v1.2 ロール・権限管理(DB): v3→v4移行・権限冪等保持・runBackup非移行・ロール変更/最後の管理者保護/強制失効/投稿権限強制', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { runBackup } = require('../src/backup');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'basic-board-v12-db-'));
+  let rawV3 = null;
+  let inspectSrc = null;
+  let inspectBak = null;
+  let rawRollback = null;
+  let db = null;
+  let reopened = null;
+
+  try {
+    // 1. 合成 v3 DB を構築し、runBackup が v3 のまま無移行で複製することを確認
+    const v3Path = path.join(tmpDir, 'v3_to_v4.db');
+    const v3BakPath = path.join(tmpDir, 'v3_backup.db');
+    rawV3 = new DatabaseSync(v3Path);
+    rawV3.exec(`
+      PRAGMA foreign_keys = ON;
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
+        auth_version INTEGER NOT NULL DEFAULT 0,
+        must_change_password INTEGER NOT NULL DEFAULT 0 CHECK(must_change_password IN (0, 1)),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE threads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+        title TEXT NOT NULL,
+        pinned_text TEXT,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id INTEGER NOT NULL REFERENCES threads(id) ON DELETE RESTRICT,
+        parent_id INTEGER,
+        author_name TEXT NOT NULL DEFAULT '名無しさん',
+        visitor_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (id, thread_id),
+        FOREIGN KEY (parent_id, thread_id) REFERENCES posts(id, thread_id) ON DELETE RESTRICT
+      );
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash) = 64),
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      );
+      CREATE TABLE admin_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        actor_type TEXT NOT NULL CHECK(actor_type IN ('admin_web', 'cli')),
+        actor_user_id INTEGER,
+        actor_username TEXT NOT NULL,
+        action TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+      );
+      PRAGMA user_version = 3;
+      INSERT INTO users (username, password_hash, role) VALUES ('root_admin', 'scrypt$v1$16384$8$1$abc$def', 'admin');
+      INSERT INTO users (username, password_hash, role) VALUES ('member_a', 'scrypt$v1$16384$8$1$abc$def', 'user');
+      INSERT INTO categories (name, display_order) VALUES ('v3カテゴリ', 1);
+      INSERT INTO threads (category_id, title, created_by) VALUES (1, 'v3スレッド', 1);
+      INSERT INTO posts (thread_id, author_name, visitor_id, content, created_by) VALUES (1, 'root_admin', 'v301', 'v3既存投稿', 1);
+    `);
+    rawV3.close();
+    rawV3 = null;
+
+    const bakRes = runBackup({ srcPath: v3Path, destPath: v3BakPath });
+    assert.equal(bakRes.success, true);
+
+    inspectSrc = new DatabaseSync(v3Path, { readOnly: true });
+    inspectBak = new DatabaseSync(v3BakPath, { readOnly: true });
+    assert.equal(Number(inspectSrc.prepare('PRAGMA user_version;').get().user_version), 3);
+    assert.equal(Number(inspectBak.prepare('PRAGMA user_version;').get().user_version), 3);
+    assert.equal(
+      inspectSrc.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'role_permissions'").get(),
+      undefined
+    );
+    assert.equal(
+      inspectBak.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'role_permissions'").get(),
+      undefined
+    );
+    inspectSrc.close();
+    inspectSrc = null;
+    inspectBak.close();
+    inspectBak = null;
+
+    // 2. v3 → v4 途中失敗時の単一トランザクション完全ロールバック確認
+    const v3RollbackPath = path.join(tmpDir, 'v3_rollback.db');
+    fs.copyFileSync(v3Path, v3RollbackPath);
+    const baseSchemaSql = fs.readFileSync(path.join(__dirname, '../src/schema.sql'), 'utf8');
+    const brokenSchemaPath = path.join(tmpDir, 'broken_v4_schema.sql');
+    fs.writeFileSync(
+      brokenSchemaPath,
+      `${baseSchemaSql}\nCREATE INDEX idx_v4_fail ON nonexistent_table(id);\n`,
+      'utf8'
+    );
+    assert.throws(
+      () => createBoardDb({ dbPath: v3RollbackPath, schemaPath: brokenSchemaPath }),
+      /nonexistent_table/
+    );
+    rawRollback = new DatabaseSync(v3RollbackPath, { readOnly: true });
+    assert.equal(Number(rawRollback.prepare('PRAGMA user_version;').get().user_version), 3);
+    assert.equal(
+      rawRollback.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'role_permissions'").get(),
+      undefined
+    );
+    rawRollback.close();
+    rawRollback = null;
+
+    // 3. 正常スキーマで v3 → v4 移行、8行初期シード、設定カスタマイズ後の再オープン冪等保持確認
+    db = createBoardDb({ dbPath: v3Path });
+    assert.equal(db.getStatus().schemaVersion, 4);
+    assert.equal(db.getThreadDetail(1).posts[0].content, 'v3既存投稿');
+
+    assert.deepEqual(db.getAllRolePermissions(), {
+      admin: { create_post: true, create_thread: true, pin_post: true, upload_image: true },
+      user: { create_post: true, create_thread: false, pin_post: false, upload_image: true },
+      guest: { create_post: true, create_thread: false, pin_post: false, upload_image: false },
+    });
+
+    // admin 変更と未知キーは 400 拒否
+    assert.throws(
+      () => db.updateRolePermissions({ role: 'admin', permissions: { create_post: false } }),
+      (err) => err.statusCode === 400
+    );
+    assert.throws(
+      () => db.updateRolePermissions({ role: 'guest', permissions: { unknown_perm: false } }),
+      (err) => err.statusCode === 400 && err.code === 'UNKNOWN_PERMISSION_KEY'
+    );
+
+    const permUpd = db.updateRolePermissions({
+      role: 'guest',
+      permissions: { create_post: false },
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(permUpd.unchanged, false);
+    assert.equal(permUpd.permissions.create_post, false);
+
+    // 同一値再保存は unchanged: true で追加監査を出さない
+    const permNoop = db.updateRolePermissions({
+      role: 'guest',
+      permissions: { create_post: false },
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(permNoop.unchanged, true);
+    assert.equal(
+      db.listAdminAuditLogs({ limit: 20 }).logs.filter((l) => l.action === 'role_permissions_update').length,
+      1
+    );
+
+    // DBを再オープンしてもカスタマイズした guest.create_post = false が上書きされないこと
+    db.close();
+    db = null;
+    reopened = createBoardDb({ dbPath: v3Path });
+    assert.equal(reopened.getStatus().schemaVersion, 4);
+    assert.equal(reopened.getEffectivePermissionsForRole('guest').create_post, false);
+    assert.equal(reopened.getEffectivePermissionsForRole('user').upload_image, true);
+
+    // 4. createPost の enforceRole 権限検査（guest は 403 PERMISSION_DENIED、admin は許可）
+    assert.throws(
+      () =>
+        reopened.createPost({
+          threadId: 1,
+          authorName: '匿名テスト',
+          visitorId: 'vis-perm-1',
+          content: '制限時投稿',
+          enforceRole: 'guest',
+        }),
+      (err) => err.statusCode === 403 && err.code === 'PERMISSION_DENIED'
+    );
+    const adminAllowedPost = reopened.createPost({
+      threadId: 1,
+      authorName: 'root_admin',
+      visitorId: 'vis-perm-2',
+      content: '管理者許可投稿',
+      createdBy: 1,
+      enforceRole: 'admin',
+    });
+    assert.equal(adminAllowedPost.content, '管理者許可投稿');
+
+    // 5. setUserRoleById / revokeAllSessionsByUserId（最後の管理者409保護・同ロールno-op・同一TX監査＆ロールバック）
+    const nowIso = '2026-11-27T05:00:00.000Z';
+    const expIso = '2026-12-04T05:00:00.000Z';
+    const rootTokenHash = '1'.repeat(64);
+    const memberTokenHash = '2'.repeat(64);
+    reopened.issueSessionIfVersionMatches({
+      userId: 1,
+      expectedAuthVersion: 0,
+      tokenHash: rootTokenHash,
+      expiresAt: expIso,
+      nowIso,
+    });
+    reopened.issueSessionIfVersionMatches({
+      userId: 2,
+      expectedAuthVersion: 0,
+      tokenHash: memberTokenHash,
+      expiresAt: expIso,
+      nowIso,
+    });
+
+    // 最後の1名降格は 409 LAST_ADMIN_PROTECTED、セッション維持
+    assert.throws(
+      () =>
+        reopened.setUserRoleById({
+          userId: 1,
+          role: 'user',
+          audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+        }),
+      (err) => err.statusCode === 409 && err.code === 'LAST_ADMIN_PROTECTED'
+    );
+    assert.ok(reopened.getSessionAuthByTokenHash(rootTokenHash, nowIso) !== null);
+
+    // 同一ロール更新は unchanged: true で auth_version・セッション・監査を変更しない
+    const sameRoleRes = reopened.setUserRoleById({
+      userId: 2,
+      role: 'user',
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(sameRoleRes.unchanged, true);
+    assert.equal(sameRoleRes.revokedSessions, 0);
+    assert.equal(reopened.getUserForAuthByUsername('member_a').auth_version, 0);
+    assert.ok(reopened.getSessionAuthByTokenHash(memberTokenHash, nowIso) !== null);
+
+    // 監査失敗時は昇格・auth_version加算・セッション失効もすべてロールバックされること
+    reopened.execRawForTesting(`
+      CREATE TRIGGER trg_v12_fail_audit
+      BEFORE INSERT ON admin_audit_logs
+      BEGIN
+        SELECT RAISE(ABORT, 'v12 audit rollback test');
+      END;
+    `);
+    assert.throws(
+      () =>
+        reopened.setUserRoleById({
+          userId: 2,
+          role: 'admin',
+          audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+        }),
+      /v12 audit rollback test/
+    );
+    assert.equal(reopened.getUserForAuthByUsername('member_a').role, 'user');
+    assert.equal(reopened.getUserForAuthByUsername('member_a').auth_version, 0);
+    assert.ok(reopened.getSessionAuthByTokenHash(memberTokenHash, nowIso) !== null);
+    reopened.execRawForTesting('DROP TRIGGER trg_v12_fail_audit;');
+
+    // 正常昇格：role更新＋auth_version加算＋対象セッション失効＋監査記録
+    const promoteRes = reopened.setUserRoleById({
+      userId: 2,
+      role: 'admin',
+      audit: { actorType: 'admin_web', actorUserId: 1, actorUsername: 'root_admin' },
+    });
+    assert.equal(promoteRes.found, true);
+    assert.equal(promoteRes.unchanged, false);
+    assert.equal(promoteRes.user.role, 'admin');
+    assert.equal(promoteRes.revokedSessions, 1);
+    assert.equal(reopened.getUserForAuthByUsername('member_a').auth_version, 1);
+    assert.equal(reopened.getSessionAuthByTokenHash(memberTokenHash, nowIso), null);
+
+    // 管理者2名の状態から1名降格は成功し、監査ログにも残る
+    const demoteRes = reopened.setUserRoleById({
+      userId: 1,
+      role: 'user',
+      audit: { actorType: 'admin_web', actorUserId: 2, actorUsername: 'member_a' },
+    });
+    assert.equal(demoteRes.found, true);
+    assert.equal(demoteRes.user.role, 'user');
+    assert.equal(demoteRes.revokedSessions, 1);
+    assert.equal(reopened.getUserForAuthByUsername('root_admin').auth_version, 1);
+
+    // revokeAllSessionsByUserId：セッション削除＋auth_version加算＋user_revoke_sessions監査
+    const memberTokenHash2 = '3'.repeat(64);
+    reopened.issueSessionIfVersionMatches({
+      userId: 2,
+      expectedAuthVersion: 1,
+      tokenHash: memberTokenHash2,
+      expiresAt: expIso,
+      nowIso,
+    });
+    const revokeRes = reopened.revokeAllSessionsByUserId(2, {
+      audit: { actorType: 'admin_web', actorUserId: 2, actorUsername: 'member_a' },
+    });
+    assert.equal(revokeRes.found, true);
+    assert.equal(revokeRes.revokedSessions, 1);
+    assert.equal(revokeRes.selfAffected, true);
+    assert.equal(reopened.getUserForAuthByUsername('member_a').auth_version, 2);
+    assert.equal(reopened.getSessionAuthByTokenHash(memberTokenHash2, nowIso), null);
+
+    const actions = reopened.listAdminAuditLogs({ limit: 20 }).logs.map((l) => l.action);
+    assert.ok(actions.includes('role_permissions_update'));
+    assert.ok(actions.includes('user_role_change'));
+    assert.ok(actions.includes('user_revoke_sessions'));
+  } finally {
+    try { rawV3?.close(); } catch {}
+    try { inspectSrc?.close(); } catch {}
+    try { inspectBak?.close(); } catch {}
+    try { rawRollback?.close(); } catch {}
+    try { db?.close(); } catch {}
+    try { reopened?.close(); } catch {}
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });

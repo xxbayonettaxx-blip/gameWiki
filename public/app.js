@@ -47,6 +47,7 @@
     bootstrapSeq: 0,
     isAuthSubmitting: false,
     user: null,                 // { id, username, role, mustChangePassword } | null
+    permissions: { create_post: true },
     anonAuthorDraft: '',
     pendingSessionExpired: false,
     pendingAuthChangedMessage: '',
@@ -338,6 +339,14 @@
       }
     }
 
+    const adminLink = $('#admin-page-link');
+    if (adminLink) adminLink.hidden = !isActiveAdmin;
+    const roleEl = $('#auth-member-role');
+    if (roleEl) {
+      roleEl.textContent = state.user?.role === 'admin' ? '管理者' : '一般会員';
+      roleEl.classList.toggle('is-admin', isActiveAdmin);
+    }
+
     const guestPanel = $('#auth-guest-panel');
     const memberPanel = $('#auth-member-panel');
     const titleEl = $('#auth-sheet-title');
@@ -353,15 +362,6 @@
           : 'アカウント管理';
       }
       $('#auth-member-name').textContent = state.user.username;
-      const roleEl = $('#auth-member-role');
-      if (roleEl) {
-        roleEl.textContent = state.user.role === 'admin' ? '管理者' : '一般会員';
-        roleEl.classList.toggle('is-admin', isActiveAdmin);
-      }
-      const adminLink = $('#admin-page-link');
-      if (adminLink) {
-        adminLink.hidden = !isActiveAdmin;
-      }
       $('#must-change-banner').hidden = !mustChange;
 
       const pwSection = $('#password-section');
@@ -409,9 +409,6 @@
         loginNotice.textContent = '';
       }
     } else {
-      const adminLink = $('#admin-page-link');
-      if (adminLink) adminLink.hidden = true;
-      $('#auth-member-role')?.classList.remove('is-admin');
       if (guestPanel) guestPanel.hidden = false;
       if (memberPanel) memberPanel.hidden = true;
       if (titleEl) titleEl.textContent = 'ログイン・新規登録';
@@ -478,6 +475,17 @@
     if (authChangedBox) authChangedBox.hidden = !showAuthChanged;
     if (authChangedMessage) {
       authChangedMessage.textContent = showAuthChanged ? state.pendingAuthChangedMessage : '';
+    }
+
+    const permBox = $('#composer-perm-box');
+    if (permBox) {
+      const blocked = state.permissions?.create_post === false && !state.user?.mustChangePassword;
+      permBox.hidden = !blocked;
+      $('#composer-perm-message').textContent = !blocked
+        ? ''
+        : state.user
+          ? '現在、一般会員の投稿は制限中です。'
+          : '未ログイン投稿は停止中です（ログインで投稿可）。';
     }
 
     syncSubmitAvailability();
@@ -570,9 +578,12 @@
     else openAuthSheet();
   }
 
-  function commitAuthUser(nextUser) {
+  function commitAuthUser(nextUser, nextPerms) {
     state.authSeq += 1;
     state.user = nextUser || null;
+    if (nextPerms && typeof nextPerms === 'object') {
+      state.permissions = nextPerms;
+    }
   }
 
   async function probeCurrentUser() {
@@ -582,14 +593,12 @@
         cache: 'no-store',
         credentials: 'same-origin',
       });
-      if (!res.ok) return { ok: false, user: null };
+      if (!res.ok) return { ok: false };
       const data = await res.json().catch(() => null);
-      if (!data || typeof data !== 'object' || !('user' in data)) {
-        return { ok: false, user: null };
-      }
-      return { ok: true, user: data.user || null };
+      if (!data || typeof data !== 'object' || !('user' in data)) return { ok: false };
+      return { ok: true, user: data.user || null, permissions: data.permissions || null };
     } catch {
-      return { ok: false, user: null };
+      return { ok: false };
     }
   }
 
@@ -598,7 +607,7 @@
     const probed = await probeCurrentUser();
     if (!probed.ok) return null;
     if (reqAuthSeq !== state.authSeq) return state.user;
-    commitAuthUser(probed.user);
+    commitAuthUser(probed.user, probed.permissions);
     syncAuthUI();
     return state.user;
   }
@@ -612,6 +621,7 @@
       state.loadingThreadId === null &&
       state.failedTargetThread === null &&
       !state.user?.mustChangePassword &&
+      state.permissions?.create_post !== false &&
       !state.isSubmitting
     );
   }
@@ -1173,6 +1183,9 @@
       // R1対策：要求開始後に認証操作（登録・ログイン・ログアウト・PW変更等）が確定していれば古い応答の user を破棄する
       if (reqAuthSeq === state.authSeq) {
         state.user = data.user || null;
+        if (data.permissions && typeof data.permissions === 'object') {
+          state.permissions = data.permissions;
+        }
         syncAuthUI();
       }
 
@@ -1445,7 +1458,7 @@
           '別タブ等でログイン状態が切り替わっています。下書きは保持しているため、現在のアカウントを確認してから再度操作してください。';
         if (reqAuthSeq === state.authSeq) {
           if (data.currentUser && typeof data.currentUser === 'object') {
-            commitAuthUser(data.currentUser);
+            commitAuthUser(data.currentUser, data.permissions);
           } else {
             await fetchCurrentUser();
           }
@@ -1457,10 +1470,10 @@
         $('#auth-changed-open-account-btn')?.focus({ preventScroll: true });
         return;
       }
-      if (res.status === 403 && data.code === 'PASSWORD_CHANGE_REQUIRED') {
+      if (res.status === 403 && (data.code === 'PASSWORD_CHANGE_REQUIRED' || data.code === 'PERMISSION_DENIED')) {
         state.pendingAuthChangedMessage = '';
         await fetchCurrentUser();
-        $('#form-error').textContent = data.error || '仮パスワードのままでは投稿できません。';
+        $('#form-error').textContent = data.error || '現在の権限・認証状態では投稿できません。';
         return;
       }
       if (!res.ok) {
@@ -1713,6 +1726,26 @@
       }
     });
 
+    function completeAuthSuccess(data, defaultMsg, reopenMsg) {
+      clearAuthPasswords();
+      commitAuthUser(data.user, data.permissions);
+      clearPendingComposerAuthAlerts();
+      state.postPasswordChangeNotice = false;
+      const shouldReopen = state.reopenComposerAfterAuth && !state.user?.mustChangePassword;
+      syncAuthUI();
+      if (state.user?.mustChangePassword) {
+        notify('仮パスワードでログインしました。新しいパスワードへ変更してください。');
+        $('#current-password').focus({ preventScroll: true });
+      } else if (shouldReopen) {
+        closeAuthSheet({ restoreFocus: false });
+        openComposer(null, $('#write-comment'));
+        notify(reopenMsg);
+      } else {
+        closeAuthSheet();
+        notify(defaultMsg);
+      }
+    }
+
     $('#login-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       if (state.isAuthSubmitting) return;
@@ -1734,24 +1767,11 @@
           $('#login-error').textContent = data.error || `ログインに失敗しました (HTTP ${res.status})`;
           return;
         }
-        clearAuthPasswords();
-        commitAuthUser(data.user);
-        clearPendingComposerAuthAlerts();
-        state.postPasswordChangeNotice = false;
-        const shouldReopen = state.reopenComposerAfterAuth && !state.user?.mustChangePassword;
-        syncAuthUI();
-
-        if (state.user?.mustChangePassword) {
-          notify('仮パスワードでログインしました。新しいパスワードへ変更してください。');
-          $('#current-password').focus({ preventScroll: true });
-        } else if (shouldReopen) {
-          closeAuthSheet({ restoreFocus: false });
-          openComposer(null, $('#write-comment'));
-          notify(`${state.user.username} として再ログインしました。投稿を続けられます。`);
-        } else {
-          closeAuthSheet();
-          notify(`${state.user.username} としてログインしました。`);
-        }
+        completeAuthSuccess(
+          data,
+          `${data.user.username} としてログインしました。`,
+          `${data.user.username} として再ログインしました。投稿を続けられます。`
+        );
       } catch {
         $('#login-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
       } finally {
@@ -1802,20 +1822,11 @@
           $('#register-error').textContent = data.error || `登録に失敗しました (HTTP ${res.status})`;
           return;
         }
-        clearAuthPasswords();
-        commitAuthUser(data.user);
-        clearPendingComposerAuthAlerts();
-        state.postPasswordChangeNotice = false;
-        const shouldReopen = state.reopenComposerAfterAuth && !state.user?.mustChangePassword;
-        syncAuthUI();
-        if (shouldReopen) {
-          closeAuthSheet({ restoreFocus: false });
-          openComposer(null, $('#write-comment'));
-          notify(`アカウント「${state.user.username}」を作成しログインしました。投稿を続けられます。`);
-        } else {
-          closeAuthSheet();
-          notify(`アカウント「${state.user.username}」を作成しログインしました。`);
-        }
+        completeAuthSuccess(
+          data,
+          `アカウント「${data.user.username}」を作成しログインしました。`,
+          `アカウント「${data.user.username}」を作成しログインしました。投稿を続けられます。`
+        );
       } catch {
         $('#register-error').textContent = '通信エラーが発生しました。時間をおいて再試行してください。';
       } finally {
@@ -1863,7 +1874,7 @@
         }
         const changedUsername = state.user?.username || '';
         clearAuthPasswords();
-        commitAuthUser(null);
+        commitAuthUser(null, data.permissions);
         state.authTab = 'login';
         clearPendingComposerAuthAlerts();
         state.postPasswordChangeNotice = true;
@@ -1894,6 +1905,7 @@
 
       let serverErr = '';
       let logoutSucceeded = false;
+      let logoutPerms = null;
       try {
         const res = await fetch('api/auth/logout', {
           method: 'POST',
@@ -1904,6 +1916,7 @@
         const data = await res.json().catch(() => ({}));
         if (res.ok) {
           logoutSucceeded = true;
+          logoutPerms = data?.permissions || null;
         } else {
           serverErr = data?.error || '';
         }
@@ -1912,8 +1925,8 @@
       }
 
       try {
-        const finishLoggedOut = (noticeText) => {
-          commitAuthUser(null);
+        const finishLoggedOut = (noticeText, nextPerms) => {
+          commitAuthUser(null, nextPerms);
           state.authTab = 'login';
           clearPendingComposerAuthAlerts();
           state.postPasswordChangeNotice = false;
@@ -1929,18 +1942,18 @@
         };
 
         if (logoutSucceeded) {
-          finishLoggedOut('ログアウトしました。');
+          finishLoggedOut('ログアウトしました。', logoutPerms);
           return;
         }
 
         const probed = await probeCurrentUser();
         if (probed.ok && probed.user === null) {
-          finishLoggedOut('ログアウトを確認しました。');
+          finishLoggedOut('ログアウトを確認しました。', probed.permissions);
           return;
         }
 
         if (probed.ok && probed.user !== null) {
-          commitAuthUser(probed.user);
+          commitAuthUser(probed.user, probed.permissions);
           syncAuthUI();
           $('#logout-error').textContent =
             serverErr || 'ログアウトを完了できませんでした。時間をおいて再度お試しください。';
