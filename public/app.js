@@ -23,8 +23,13 @@
   const MAX_VISUAL_DEPTH = 2; // 親(0)・子(1)・孫(2)の3層までインデント、4層目以降はフラット
   const AUTH_MISMATCH_FORM_ERROR =
     'アカウント状態が変更されたため送信を中断しました（下書きは保持しています）。';
+  const SESSION_EXPIRED_ERROR = 'ログインの有効期限が切れています。';
 
   const $ = (sel) => document.querySelector(sel);
+  const setText = (sel, text) => {
+    const node = $(sel);
+    if (node) node.textContent = text;
+  };
 
   const state = {
     categories: [],
@@ -235,6 +240,20 @@
     }
   }
 
+  function setSheetOpen(sheetSel, backdropSel, triggerSel, open, restoreFocus = false) {
+    const sheet = $(sheetSel);
+    const backdrop = $(backdropSel);
+    const trigger = $(triggerSel);
+    sheet.classList.toggle('is-open', open);
+    sheet.setAttribute('aria-hidden', String(!open));
+    sheet.inert = !open;
+    backdrop.hidden = !open;
+    trigger.setAttribute('aria-expanded', String(open));
+    syncOverlayAccessibility();
+    if (open) void sheet.offsetWidth;
+    else if (restoreFocus) trigger.focus({ preventScroll: true });
+  }
+
   function openSettings() {
     if (state.authOpen) {
       closeAuthSheet({ restoreFocus: false });
@@ -243,35 +262,14 @@
       closeComposer({ restoreFocus: false });
     }
     state.settingsOpen = true;
-    const sheet = $('#settings-sheet');
-    const backdrop = $('#settings-backdrop');
-    const trigger = $('#settings-open');
-
-    backdrop.hidden = false;
-    sheet.inert = false;
-    sheet.setAttribute('aria-hidden', 'false');
-    sheet.classList.add('is-open');
-    trigger.setAttribute('aria-expanded', 'true');
-    syncOverlayAccessibility();
-    // visibility: visible を即座にレイアウト確定させてからフォーカスを当てる
-    void sheet.offsetWidth;
+    setSheetOpen('#settings-sheet', '#settings-backdrop', '#settings-open', true);
     $('#settings-close').focus({ preventScroll: true });
   }
 
   function closeSettings({ restoreFocus = true } = {}) {
     if (!state.settingsOpen) return;
     state.settingsOpen = false;
-    const sheet = $('#settings-sheet');
-    const backdrop = $('#settings-backdrop');
-    const trigger = $('#settings-open');
-
-    sheet.classList.remove('is-open');
-    sheet.setAttribute('aria-hidden', 'true');
-    sheet.inert = true;
-    backdrop.hidden = true;
-    trigger.setAttribute('aria-expanded', 'false');
-    syncOverlayAccessibility();
-    if (restoreFocus) trigger.focus({ preventScroll: true });
+    setSheetOpen('#settings-sheet', '#settings-backdrop', '#settings-open', false, restoreFocus);
   }
 
   function toggleSettings() {
@@ -302,8 +300,7 @@
 
   function clearAuthErrors() {
     for (const sel of ['#login-error', '#register-error', '#password-error', '#logout-error']) {
-      const node = $(sel);
-      if (node) node.textContent = '';
+      setText(sel, '');
     }
   }
 
@@ -357,11 +354,9 @@
       if (guestPanel) guestPanel.hidden = true;
       if (memberPanel) memberPanel.hidden = false;
       if (titleEl) {
-        titleEl.textContent = mustChange
-          ? 'パスワード変更のお願い'
-          : 'アカウント管理';
+        titleEl.textContent = mustChange ? 'パスワード変更のお願い' : 'アカウント管理';
       }
-      $('#auth-member-name').textContent = state.user.username;
+      setText('#auth-member-name', state.user.username);
       $('#must-change-banner').hidden = !mustChange;
 
       const pwSection = $('#password-section');
@@ -369,18 +364,14 @@
         pwSection.classList.toggle('is-required', mustChange);
         if (mustChange) pwSection.open = true;
       }
-      const pwSummary = $('#password-section-summary');
-      if (pwSummary) {
-        pwSummary.textContent = mustChange
-          ? '仮パスワードから新しいパスワードへ変更（必須）'
-          : 'パスワードを変更する';
-      }
-      const curLabel = $('#current-password-label');
-      if (curLabel) {
-        curLabel.textContent = mustChange
-          ? '現在のパスワード（管理者から受け取った仮パスワード）'
-          : '現在のパスワード';
-      }
+      setText(
+        '#password-section-summary',
+        mustChange ? '仮パスワードから新しいパスワードへ変更（必須）' : 'パスワードを変更する'
+      );
+      setText(
+        '#current-password-label',
+        mustChange ? '現在のパスワード（管理者から受け取った仮パスワード）' : '現在のパスワード'
+      );
       const curInput = $('#current-password');
       if (curInput) {
         curInput.placeholder = mustChange ? '管理者から受け取った仮パスワードを入力' : '';
@@ -392,18 +383,16 @@
           ? '※先ほどログインに使った「仮パスワード」を入力してください（リセット前の旧パスワードではありません）。'
           : '';
       }
-      const newLabel = $('#new-password-label');
-      if (newLabel) {
-        newLabel.textContent = mustChange
-          ? '新しく設定する本番パスワード（8〜128文字）'
-          : '新しいパスワード（8〜128文字）';
-      }
-      const pwSubmit = $('#password-submit');
-      if (pwSubmit) {
-        pwSubmit.textContent = mustChange
+      setText(
+        '#new-password-label',
+        mustChange ? '新しく設定する本番パスワード（8〜128文字）' : '新しいパスワード（8〜128文字）'
+      );
+      setText(
+        '#password-submit',
+        mustChange
           ? '新しいパスワードを設定してログイン画面へ進む'
-          : 'パスワードを変更する（変更後は再ログイン）';
-      }
+          : 'パスワードを変更する（変更後は再ログイン）'
+      );
       if (loginNotice) {
         loginNotice.hidden = true;
         loginNotice.textContent = '';
@@ -414,15 +403,12 @@
       if (titleEl) titleEl.textContent = 'ログイン・新規登録';
 
       const isLogin = state.authTab !== 'register';
-      const loginTab = $('#auth-tab-login');
-      const registerTab = $('#auth-tab-register');
-      if (loginTab) {
-        loginTab.setAttribute('aria-selected', String(isLogin));
-        loginTab.tabIndex = isLogin ? 0 : -1;
-      }
-      if (registerTab) {
-        registerTab.setAttribute('aria-selected', String(!isLogin));
-        registerTab.tabIndex = isLogin ? -1 : 0;
+      for (const [sel, active] of [['#auth-tab-login', isLogin], ['#auth-tab-register', !isLogin]]) {
+        const tab = $(sel);
+        if (tab) {
+          tab.setAttribute('aria-selected', String(active));
+          tab.tabIndex = active ? 0 : -1;
+        }
       }
       $('#login-form').hidden = !isLogin;
       $('#register-form').hidden = isLogin;
@@ -440,7 +426,6 @@
     const mustChangeBox = $('#composer-must-change-box');
     const expiredBox = $('#session-expired-box');
     const authChangedBox = $('#auth-changed-box');
-    const authChangedMessage = $('#auth-changed-message');
 
     if (authorInput) {
       if (state.user) {
@@ -473,19 +458,16 @@
 
     const showAuthChanged = Boolean(state.user && state.pendingAuthChangedMessage);
     if (authChangedBox) authChangedBox.hidden = !showAuthChanged;
-    if (authChangedMessage) {
-      authChangedMessage.textContent = showAuthChanged ? state.pendingAuthChangedMessage : '';
-    }
+    setText('#auth-changed-message', showAuthChanged ? state.pendingAuthChangedMessage : '');
 
     const permBox = $('#composer-perm-box');
     if (permBox) {
       const blocked = state.permissions?.create_post === false && !state.user?.mustChangePassword;
       permBox.hidden = !blocked;
-      $('#composer-perm-message').textContent = !blocked
-        ? ''
-        : state.user
-          ? '現在、一般会員の投稿は制限中です。'
-          : '未ログイン投稿は停止中です（ログインで投稿可）。';
+      setText(
+        '#composer-perm-message',
+        !blocked ? '' : state.user ? '現在、一般会員の投稿は制限中です。' : '未ログイン投稿は停止中です（ログインで投稿可）。'
+      );
     }
 
     syncSubmitAvailability();
@@ -524,32 +506,16 @@
   }
 
   function openAuthSheet({ tab = null, reopenComposer = false } = {}) {
-    if (state.settingsOpen) {
-      closeSettings({ restoreFocus: false });
-    }
-    if (state.composerOpen && !DESKTOP_MEDIA.matches) {
-      closeComposer({ restoreFocus: false });
-    }
+    if (state.settingsOpen) closeSettings({ restoreFocus: false });
+    if (state.composerOpen && !DESKTOP_MEDIA.matches) closeComposer({ restoreFocus: false });
     state.reopenComposerAfterAuth = Boolean(reopenComposer);
-    if (tab === 'login' || tab === 'register') {
-      state.authTab = tab;
-    }
+    if (tab === 'login' || tab === 'register') state.authTab = tab;
     state.authOpen = true;
     clearAuthErrors();
     const pwSection = $('#password-section');
     if (pwSection) pwSection.open = Boolean(state.user?.mustChangePassword);
     syncAuthUI();
-
-    const sheet = $('#auth-sheet');
-    const backdrop = $('#auth-backdrop');
-    const trigger = $('#auth-open');
-    backdrop.hidden = false;
-    sheet.inert = false;
-    sheet.setAttribute('aria-hidden', 'false');
-    sheet.classList.add('is-open');
-    trigger.setAttribute('aria-expanded', 'true');
-    syncOverlayAccessibility();
-    void sheet.offsetWidth;
+    setSheetOpen('#auth-sheet', '#auth-backdrop', '#auth-open', true);
     focusFirstAuthField();
   }
 
@@ -560,17 +526,7 @@
     if (!state.authOpen) return;
     state.authOpen = false;
     state.reopenComposerAfterAuth = false;
-
-    const sheet = $('#auth-sheet');
-    const backdrop = $('#auth-backdrop');
-    const trigger = $('#auth-open');
-    sheet.classList.remove('is-open');
-    sheet.setAttribute('aria-hidden', 'true');
-    sheet.inert = true;
-    backdrop.hidden = true;
-    trigger.setAttribute('aria-expanded', 'false');
-    syncOverlayAccessibility();
-    if (restoreFocus) trigger.focus({ preventScroll: true });
+    setSheetOpen('#auth-sheet', '#auth-backdrop', '#auth-open', false, restoreFocus);
   }
 
   function toggleAuthSheet() {
@@ -602,13 +558,32 @@
     }
   }
 
-  async function fetchCurrentUser() {
+  async function fetchCurrentUser({ warnOnSwitch = false } = {}) {
     const reqAuthSeq = state.authSeq;
     const probed = await probeCurrentUser();
     if (!probed.ok) return null;
     if (reqAuthSeq !== state.authSeq) return state.user;
+    const prevId = state.user?.id ?? null;
+    const nextId = probed.user?.id ?? null;
+    const hasDraft = Boolean(
+      state.composerOpen || ($('#comment-body')?.value || '') !== '' || state.drafts.size > 0
+    );
+    const switched = warnOnSwitch && hasDraft && prevId !== nextId;
     commitAuthUser(probed.user, probed.permissions);
+    if (switched) {
+      state.pendingSessionExpired = nextId === null;
+      state.pendingAuthChangedMessage =
+        nextId === null
+          ? ''
+          : `別タブ等で「${probed.user.username}」へ${prevId === null ? 'ログイン' : '切替'}されました。下書きは保持しています。このまま投稿するか、アカウント画面で確認してください。`;
+    }
     syncAuthUI();
+    if (switched && state.composerOpen) {
+      setText('#form-error', nextId === null ? SESSION_EXPIRED_ERROR : AUTH_MISMATCH_FORM_ERROR);
+      $(nextId === null ? '#expired-relogin-btn' : '#auth-changed-open-account-btn')?.focus({
+        preventScroll: true,
+      });
+    }
     return state.user;
   }
 
@@ -621,6 +596,7 @@
       state.loadingThreadId === null &&
       state.failedTargetThread === null &&
       !state.user?.mustChangePassword &&
+      !state.pendingSessionExpired &&
       state.permissions?.create_post !== false &&
       !state.isSubmitting
     );
@@ -1123,19 +1099,19 @@
 
   function syncHeaders() {
     if (!state.activeCategory) return;
-    $('#breadcrumb-category').textContent = state.activeCategory.name;
-    $('#category-title').textContent = state.activeCategory.name;
-    $('#thread-category-tag').textContent = state.activeCategory.name;
+    for (const sel of ['#breadcrumb-category', '#category-title', '#thread-category-tag']) {
+      setText(sel, state.activeCategory.name);
+    }
 
     const threads = state.activeCategory.threads || [];
     const idx = threads.findIndex((t) => t.id === state.activeThreadId);
-    $('#thread-label').textContent = `THREAD ${String(idx >= 0 ? idx + 1 : 1).padStart(2, '0')}`;
+    setText('#thread-label', `THREAD ${String(idx >= 0 ? idx + 1 : 1).padStart(2, '0')}`);
 
     if (state.activeThreadData) {
-      $('#thread-title').textContent = state.activeThreadData.title;
+      setText('#thread-title', state.activeThreadData.title);
     } else if (state.loadingThreadId === null) {
-      $('#thread-title').textContent = 'スレッドがありません';
-      $('#thread-label').textContent = 'THREAD --';
+      setText('#thread-title', 'スレッドがありません');
+      setText('#thread-label', 'THREAD --');
     }
     syncThreadGuide();
     syncComposerHeader();
@@ -1448,7 +1424,7 @@
           state.pendingAuthChangedMessage = '';
           syncAuthUI();
         }
-        $('#form-error').textContent = data.error || 'ログインの有効期限が切れています。';
+        setText('#form-error', data.error || SESSION_EXPIRED_ERROR);
         $('#expired-relogin-btn')?.focus({ preventScroll: true });
         return;
       }
@@ -1466,14 +1442,14 @@
           state.pendingAuthChangedMessage = mismatchMsg;
           syncAuthUI();
         }
-        $('#form-error').textContent = AUTH_MISMATCH_FORM_ERROR;
+        setText('#form-error', AUTH_MISMATCH_FORM_ERROR);
         $('#auth-changed-open-account-btn')?.focus({ preventScroll: true });
         return;
       }
       if (res.status === 403 && (data.code === 'PASSWORD_CHANGE_REQUIRED' || data.code === 'PERMISSION_DENIED')) {
         state.pendingAuthChangedMessage = '';
         await fetchCurrentUser();
-        $('#form-error').textContent = data.error || '現在の権限・認証状態では投稿できません。';
+        setText('#form-error', data.error || '現在の権限・認証状態では投稿できません。');
         return;
       }
       if (!res.ok) {
@@ -1639,7 +1615,7 @@
       const targetId = state.failedTargetThread ? state.failedTargetThread.id : state.activeThreadId;
       if (targetId !== null) {
         loadThread(targetId, { preserveFocusSelector: '#reload-thread' });
-        fetchCurrentUser();
+        fetchCurrentUser({ warnOnSwitch: true });
       } else {
         loadInitialData();
       }
@@ -1681,9 +1657,13 @@
       const btn = e.currentTarget;
       btn.disabled = true;
       try {
-        await fetchCurrentUser();
-        if (canSubmitPost()) {
-          $('#form-error').textContent = '';
+        await fetchCurrentUser({ warnOnSwitch: true });
+        if (state.pendingSessionExpired) {
+          notify('ログインが切れています。再ログインか匿名投稿を選択してください。');
+        } else if (state.pendingAuthChangedMessage) {
+          notify('アカウントが切り替わっています。投稿者を確認してください。');
+        } else if (canSubmitPost()) {
+          setText('#form-error', '');
           $('#submit-button')?.focus({ preventScroll: true });
           notify('投稿権限を確認しました。送信できます。');
         } else if (state.permissions?.create_post === false) {
@@ -1893,11 +1873,9 @@
         if (changedUsername && $('#login-username')) {
           $('#login-username').value = changedUsername;
         }
-        if (changedUsername && $('#login-password')) {
-          $('#login-password').focus({ preventScroll: true });
-        } else {
-          $('#login-username')?.focus({ preventScroll: true });
-        }
+        $(changedUsername && $('#login-password') ? '#login-password' : '#login-username')?.focus({
+          preventScroll: true,
+        });
         notify('パスワードを変更しました。新しいパスワードで再ログインしてください。');
       } catch {
         $('#password-error').textContent = NET_ERR_RETRY;
@@ -1981,17 +1959,19 @@
     $('#settings-close').addEventListener('click', () => closeSettings());
     $('#settings-backdrop').addEventListener('click', () => closeSettings());
 
-    document.querySelectorAll('button[data-set-theme]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        state.prefs.theme = btn.dataset.setTheme;
-        applyPreferences(true);
+    const bindPrefButtons = (attr, setter) => {
+      document.querySelectorAll(`button[${attr}]`).forEach((btn) => {
+        btn.addEventListener('click', () => {
+          setter(btn.dataset);
+          applyPreferences(true);
+        });
       });
+    };
+    bindPrefButtons('data-set-theme', (d) => {
+      state.prefs.theme = d.setTheme;
     });
-    document.querySelectorAll('button[data-set-font]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        state.prefs.font = Number(btn.dataset.setFont);
-        applyPreferences(true);
-      });
+    bindPrefButtons('data-set-font', (d) => {
+      state.prefs.font = Number(d.setFont);
     });
     $('#comment-background').addEventListener('change', (e) => {
       state.prefs.background = e.target.checked;

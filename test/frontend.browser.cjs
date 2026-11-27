@@ -2859,6 +2859,171 @@ test('実ブラウザで下書き・遅延応答・入力シートを検証す�
     }
   });
 
+  await t.test('v1.2 レビュー回帰(P2): 権限再確認・更新時の別タブアカウント切替（匿名→会員／会員A→B／会員→ログアウト）で警告表示・下書き/返信先保持・確認後送信ができること', async () => {
+    const setField = async (selector, value) => {
+      await evaluate(
+        `document.querySelector(${JSON.stringify(selector)}).value = ${JSON.stringify(value)};` +
+          `document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new Event('input', { bubbles: true }));`
+      );
+    };
+
+    try {
+      await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+
+      // 1. 匿名（guest投稿停止中）で返信下書き＋ペンネーム入力 → 別タブで会員ログイン → 「権限を再確認」で警告＋フォーカス保護 → ログアウトでペンネーム維持し匿名送信
+      await send('Network.clearBrowserCookies');
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: false },
+        audit: { actorType: 'cli', actorUsername: 'p2-e2e-setup' },
+      });
+      db.updateRolePermissions({
+        role: 'user',
+        permissions: { create_post: true },
+        audit: { actorType: 'cli', actorUsername: 'p2-e2e-setup' },
+      });
+
+      await send('Page.navigate', { url: url + '?v12p2=2#thread-1' });
+      await waitFor("document.querySelector('#thread-title')?.textContent === '雑談' && document.querySelector('#auth-open-label')?.textContent === 'ログイン'");
+
+      await click('#comments .reply-button');
+      await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#composer-mode-badge')?.textContent.includes('返信モード')");
+      await setField('#author-name', '匿名ペンネームP2');
+      await setField('#comment-body', '匿名→会員の権限再確認下書き');
+      assert.equal(await evaluate("document.querySelector('#composer-perm-box').hidden"), false);
+      assert.equal(await evaluate("document.querySelector('#submit-button').disabled"), true);
+
+      const bgUserLogin = await evaluate(
+        "fetch('api/auth/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ username: 'v12_e2e_member', password: 'v12-member-pass-123' }) }).then((r) => r.status)"
+      );
+      assert.equal(bgUserLogin, 200);
+
+      await click('#composer-recheck-perm-btn');
+      await waitFor("!document.querySelector('#auth-changed-box').hidden");
+      assert.ok((await evaluate("document.querySelector('#auth-changed-message').textContent")).includes('v12_e2e_member'));
+      assert.equal(await evaluate("document.activeElement?.id"), 'auth-changed-open-account-btn');
+      assert.equal(await evaluate("document.querySelector('#author-name').value"), 'v12_e2e_member');
+      assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), true);
+      assert.equal(await evaluate("document.querySelector('#comment-body').value"), '匿名→会員の権限再確認下書き');
+      assert.ok((await evaluate("document.querySelector('#composer-mode-badge').textContent")).includes('返信モード'));
+
+      // 意図しない会員投稿をやめてログアウトすると元の匿名ペンネーム・本文・返信先へ戻ること
+      await click('#auth-changed-open-account-btn');
+      await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+      await click('#logout-button');
+      await waitFor(
+        "document.querySelector('#auth-open-label')?.textContent === 'ログイン' && !document.querySelector('#auth-sheet').classList.contains('is-open') && document.querySelector('#composer-drawer').classList.contains('is-open')"
+      );
+      assert.equal(await evaluate("document.querySelector('#auth-changed-box').hidden"), true);
+      assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), false);
+      assert.equal(await evaluate("document.querySelector('#author-name').value"), '匿名ペンネームP2');
+      assert.equal(await evaluate("document.querySelector('#comment-body').value"), '匿名→会員の権限再確認下書き');
+      assert.ok((await evaluate("document.querySelector('#composer-mode-badge').textContent")).includes('返信モード'));
+
+      // ゲスト投稿を許可し、同一ユーザー状態のまま「権限を再確認」→ 送信ボタンへフォーカスし匿名返信完了
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: true },
+        audit: { actorType: 'cli', actorUsername: 'p2-e2e-setup' },
+      });
+      await click('#composer-recheck-perm-btn');
+      await waitFor("document.querySelector('#composer-perm-box')?.hidden === true && document.querySelector('#submit-button')?.disabled === false");
+      assert.equal(await evaluate("document.activeElement?.id"), 'submit-button');
+      await evaluate("document.querySelector('#comment-form').requestSubmit()");
+      await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#comments')?.textContent.includes('匿名→会員の権限再確認下書き')");
+      const savedDir1 = db.getThreadDetail(1).posts.find((p) => p.content === '匿名→会員の権限再確認下書き');
+      assert.ok(savedDir1);
+      assert.equal(savedDir1.is_member, false);
+      assert.equal(savedDir1.author_name, '匿名ペンネームP2');
+      assert.ok(savedDir1.parent_id !== null);
+
+      // 2. 会員Aで返信下書き → 別タブで会員Bログイン → 「↻ 更新」で警告＋フォーカス保護 → 確認後に会員Bで返信完了
+      await click('#auth-open');
+      await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+      await setField('#login-username', 'v12_e2e_member');
+      await setField('#login-password', 'v12-member-pass-123');
+      await evaluate("document.querySelector('#login-form').requestSubmit()");
+      await waitFor("document.querySelector('#auth-open-label')?.textContent === 'v12_e2e_member' && !document.querySelector('#auth-sheet').classList.contains('is-open')");
+
+      await click('#comments .reply-button');
+      await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#composer-mode-badge')?.textContent.includes('返信モード')");
+      await setField('#comment-body', '会員A→Bの更新切替下書き');
+
+      const bgSwitchB = await evaluate(
+        "fetch('api/auth/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ username: 'race_reg_user', password: 'race-reg-pass-1234' }) }).then((r) => r.status)"
+      );
+      assert.equal(bgSwitchB, 200);
+
+      await click('#reload-thread');
+      await waitFor("!document.querySelector('#auth-changed-box').hidden");
+      assert.ok((await evaluate("document.querySelector('#auth-changed-message').textContent")).includes('race_reg_user'));
+      assert.equal(await evaluate("document.activeElement?.id"), 'auth-changed-open-account-btn');
+      assert.equal(await evaluate("document.querySelector('#author-name').value"), 'race_reg_user');
+      assert.equal(await evaluate("document.querySelector('#author-name').readOnly"), true);
+      assert.equal(await evaluate("document.querySelector('#comment-body').value"), '会員A→Bの更新切替下書き');
+      assert.ok((await evaluate("document.querySelector('#composer-mode-badge').textContent")).includes('返信モード'));
+
+      await evaluate("document.querySelector('#comment-form').requestSubmit()");
+      await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#comments')?.textContent.includes('会員A→Bの更新切替下書き')");
+      assert.equal(await evaluate("document.querySelector('#auth-changed-box').hidden"), true);
+      const savedDir2 = db.getThreadDetail(1).posts.find((p) => p.content === '会員A→Bの更新切替下書き');
+      assert.ok(savedDir2);
+      assert.equal(savedDir2.is_member, true);
+      assert.equal(savedDir2.author_name, 'race_reg_user');
+      assert.ok(savedDir2.parent_id !== null);
+
+      // 3. 会員(race_reg_user)で返信下書き → 別タブでログアウト → 「↻ 更新」で失効警告＆送信無効 → 再ログインで会員返信完了
+      await click('#comments .reply-button');
+      await waitFor("document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#composer-mode-badge')?.textContent.includes('返信モード')");
+      await setField('#comment-body', '会員→ログアウトの更新検知下書き');
+
+      const bgLogout = await evaluate(
+        "fetch('api/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: '{}' }).then((r) => r.status)"
+      );
+      assert.equal(bgLogout, 200);
+
+      await click('#reload-thread');
+      await waitFor("!document.querySelector('#session-expired-box').hidden");
+      assert.equal(await evaluate("document.querySelector('#auth-open-label').textContent"), 'ログイン');
+      assert.equal(await evaluate("document.querySelector('#submit-button').disabled"), true);
+      assert.equal(await evaluate("document.activeElement?.id"), 'expired-relogin-btn');
+      assert.equal(await evaluate("document.querySelector('#comment-body').value"), '会員→ログアウトの更新検知下書き');
+      assert.ok((await evaluate("document.querySelector('#composer-mode-badge').textContent")).includes('返信モード'));
+
+      await click('#expired-relogin-btn');
+      await waitFor("document.querySelector('#auth-sheet').classList.contains('is-open')");
+      await setField('#login-username', 'race_reg_user');
+      await setField('#login-password', 'race-reg-pass-1234');
+      await evaluate("document.querySelector('#login-form').requestSubmit()");
+      await waitFor(
+        "document.querySelector('#auth-open-label')?.textContent === 'race_reg_user' && !document.querySelector('#auth-sheet').classList.contains('is-open') && document.querySelector('#composer-drawer').classList.contains('is-open')"
+      );
+      assert.equal(await evaluate("document.querySelector('#session-expired-box').hidden"), true);
+      assert.equal(await evaluate("document.querySelector('#submit-button').disabled"), false);
+      assert.equal(await evaluate("document.querySelector('#comment-body').value"), '会員→ログアウトの更新検知下書き');
+      assert.ok((await evaluate("document.querySelector('#composer-mode-badge').textContent")).includes('返信モード'));
+
+      await evaluate("document.querySelector('#comment-form').requestSubmit()");
+      await waitFor("!document.querySelector('#composer-drawer').classList.contains('is-open') && document.querySelector('#comments')?.textContent.includes('会員→ログアウトの更新検知下書き')");
+      const savedDir3 = db.getThreadDetail(1).posts.find((p) => p.content === '会員→ログアウトの更新検知下書き');
+      assert.ok(savedDir3);
+      assert.equal(savedDir3.is_member, true);
+      assert.equal(savedDir3.author_name, 'race_reg_user');
+      assert.ok(savedDir3.parent_id !== null);
+    } finally {
+      db.updateRolePermissions({
+        role: 'guest',
+        permissions: { create_post: true },
+        audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
+      });
+      db.updateRolePermissions({
+        role: 'user',
+        permissions: { create_post: true },
+        audit: { actorType: 'cli', actorUsername: 'test-cleanup' },
+      });
+    }
+  });
+
   if (process.env.FRONTEND_ARTIFACT_DIR) {
     fs.mkdirSync(process.env.FRONTEND_ARTIFACT_DIR, { recursive: true });
     const screenshot = await send('Page.captureScreenshot', { format: 'png' });
